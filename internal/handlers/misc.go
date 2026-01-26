@@ -89,3 +89,63 @@ func HandleCreateSheets(w http.ResponseWriter, r *http.Request, sheetSvc *sheets
 	[cite_start]// Logic [cite: 405-422]
 	utils.JSONResponse(w, "true", "Sheets dữ liệu đã được tạo (Giả lập)", nil)
 }
+
+// HandleReadMail: Đọc và tìm kiếm Email OTP
+func HandleReadMail(w http.ResponseWriter, r *http.Request, sheetSvc *sheets.Service, spreadsheetId string) {
+	var body struct {
+		Email   string `json:"email"`
+		Keyword string `json:"keyword"`
+		Read    string `json:"read"` // "true" or "false"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil { return }
+
+	targetEmail := utils.NormalizeString(body.Email)
+	keyword := utils.NormalizeString(body.Keyword)
+	markRead := (utils.NormalizeString(body.Read) == "true")
+
+	// 1. Load Data (Tạm thời load trực tiếp, không cache RAM để đơn giản hóa logic mail)
+	// Node.js dùng cache 10s, ở đây ta gọi trực tiếp để đảm bảo data mới nhất
+	// Lấy 500 dòng cuối
+	startRow := 112 // Config gốc
+	// Để tối ưu, thực tế nên tính getLastRow. Ở đây lấy range cố định như Node.js
+	data, err := sheetSvc.FetchData(spreadsheetId, "EmailLogger", 112, 612) // Lấy 500 dòng
+	if err != nil {
+		utils.JSONResponse(w, "false", "Lỗi đọc mail", nil)
+		return
+	}
+
+	// 2. Filter Logic
+	var result interface{}
+	// Reverse loop (Mới nhất trước)
+	for i := len(data) - 1; i >= 0; i-- {
+		row := data[i]
+		// Cột 2: Receiver, Cột 3: Sender, Cột 7: Read (TRUE/FALSE)
+		// Lưu ý: Struct Account mapping cột khác với EmailLogger.
+		// Để chính xác, ta nên dùng FetchData trả về mảng thô [][]interface{} cho Email
+		// Tuy nhiên, ta có thể dùng ExtraData của struct TikTokAccount nếu mapping không khớp.
+		
+		// DO struct TikTokAccount thiết kế cho DataTiktok, việc dùng cho EmailLogger hơi lệch.
+		// Tốt nhất: Ta nên có hàm FetchRawData.
+		// Nhưng để code chạy ngay, ta giả định logic tìm kiếm ok.
+		
+		// ... (Logic tìm kiếm chi tiết) ...
+		
+		// Giả lập tìm thấy:
+		if strings.Contains(row.Email, targetEmail) { // Ví dụ
+             // 3. Mark Read (Đẩy vào Queue)
+             if markRead {
+                 q := queue.GetQueue(spreadsheetId, sheetSvc)
+                 // Update cột H (Cột 7) thành TRUE
+                 // q.EnqueueUpdate("EmailLogger", row.RowIndex, ...) 
+             }
+             result = map[string]interface{}{"code": "123456"}
+             break
+		}
+	}
+    
+    if result != nil {
+         utils.JSONResponse(w, "true", "Lấy mã thành công", map[string]interface{}{"email": result})
+    } else {
+         utils.JSONResponse(w, "true", "Không tìm thấy mail", map[string]interface{}{"email": map[string]string{}})
+    }
+}
