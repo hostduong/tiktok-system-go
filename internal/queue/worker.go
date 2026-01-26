@@ -1,7 +1,6 @@
 package queue
 
 import (
-	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -17,17 +16,22 @@ type QueueManager struct {
 	SpreadsheetID string
 	SheetSvc      *sheets.Service
 	
+	// --- DATA QUEUE (Cho DataTiktok, PostLogger...) ---
 	// Lưu các dòng cần Update: Map[SheetName][RowIndex] -> Data
 	Updates map[string]map[int]*models.TikTokAccount
-	
 	// Lưu các dòng cần Append (Log): Map[SheetName] -> List of Rows
 	Appends map[string][][]interface{}
+
+	// --- MAIL QUEUE (Cho EmailLogger) ---
+	// Node.js Logic: Chỉ cần lưu RowIndex cần đánh dấu TRUE
+	// Map[RowIndex] -> "TRUE"
+	MailUpdates map[int]string
 
 	IsFlushing bool
 	Timer      *time.Timer
 }
 
-// GlobalQueues: Quản lý nhiều file Sheet khác nhau
+// GlobalQueues: Quản lý Queue cho nhiều file Sheet khác nhau
 var (
 	GlobalQueues = sync.Map{} // Map[SpreadsheetID]*QueueManager
 )
@@ -43,12 +47,13 @@ func GetQueue(sid string, svc *sheets.Service) *QueueManager {
 		SheetSvc:      svc,
 		Updates:       make(map[string]map[int]*models.TikTokAccount),
 		Appends:       make(map[string][][]interface{}),
+		MailUpdates:   make(map[int]string), // Khởi tạo Mail Queue riêng
 	}
 	GlobalQueues.Store(sid, q)
 	return q
 }
 
-// EnqueueUpdate: Đẩy lệnh update vào hàng đợi
+// EnqueueUpdate: Đẩy lệnh cập nhật Data vào hàng đợi
 func (q *QueueManager) EnqueueUpdate(sheetName string, rowIndex int, data *models.TikTokAccount) {
 	q.Lock()
 	defer q.Unlock()
@@ -56,13 +61,13 @@ func (q *QueueManager) EnqueueUpdate(sheetName string, rowIndex int, data *model
 	if _, ok := q.Updates[sheetName]; !ok {
 		q.Updates[sheetName] = make(map[int]*models.TikTokAccount)
 	}
-	// Cơ chế đè: Lệnh mới nhất sẽ thắng
+	// Cơ chế đè: Lệnh mới nhất sẽ thắng (Optimistic Locking logic)
 	q.Updates[sheetName][rowIndex] = data
 
 	q.checkTrigger()
 }
 
-// EnqueueAppend: Đẩy lệnh thêm mới (Log)
+// EnqueueAppend: Đẩy lệnh thêm mới Data vào hàng đợi
 func (q *QueueManager) EnqueueAppend(sheetName string, rowData []interface{}) {
 	q.Lock()
 	defer q.Unlock()
@@ -71,20 +76,36 @@ func (q *QueueManager) EnqueueAppend(sheetName string, rowData []interface{}) {
 	q.checkTrigger()
 }
 
-// Smart Piggyback Logic: Kiểm tra xem có cần xả hàng ngay không
+// 🔥 EnqueueMailUpdate: Đẩy lệnh đánh dấu Mail vào hàng đợi RIÊNG
+func (q *QueueManager) EnqueueMailUpdate(rowIndex int) {
+	q.Lock()
+	defer q.Unlock()
+
+	// Logic Node.js: Set value "TRUE" cho dòng này
+	q.MailUpdates[rowIndex] = "TRUE"
+	
+	q.checkTrigger()
+}
+
+// checkTrigger: Smart Piggyback (Kiểm tra tổng lượng pending)
 func (q *QueueManager) checkTrigger() {
 	total := 0
+	
+	// Đếm Data Update
 	for _, m := range q.Updates { total += len(m) }
+	// Đếm Data Append
 	for _, l := range q.Appends { total += len(l) }
+	// Đếm Mail Update
+	total += len(q.MailUpdates)
 
-	// Nếu > 100 dòng -> Ép xả ngay (Giống Node.js)
+	[cite_start]// Logic Node.js [cite: 435-436]: Nếu > 100 dòng -> Ép xả ngay (Urgent Flush)
 	if total > 100 {
 		if q.Timer != nil { q.Timer.Stop() }
 		go q.Flush(false)
 		return
 	}
 
-	// Nếu chưa có timer -> Hẹn giờ 3 giây
+	[cite_start]// Nếu chưa có timer -> Hẹn giờ 3 giây (Logic Node.js [cite: 26])
 	if q.Timer == nil {
 		q.Timer = time.AfterFunc(3*time.Second, func() {
 			q.Flush(false)
@@ -92,7 +113,7 @@ func (q *QueueManager) checkTrigger() {
 	}
 }
 
-// Flush: Ghi dữ liệu xuống Google Sheets
+// Flush: Thực hiện ghi xuống Google Sheets (Xử lý tách biệt Data và Mail)
 func (q *QueueManager) Flush(isShutdown bool) {
 	q.Lock()
 	if q.IsFlushing {
@@ -101,15 +122,17 @@ func (q *QueueManager) Flush(isShutdown bool) {
 	}
 	q.IsFlushing = true
 	
-	// Snapshot: Lấy dữ liệu ra để xử lý, giải phóng hàng đợi
+	// 1. Snapshot: Copy dữ liệu ra để xử lý, giải phóng Queue ngay lập tức
 	pendingUpdates := q.Updates
 	pendingAppends := q.Appends
-	
-	// Reset Queue
+	pendingMails := q.MailUpdates // Snapshot Mail Queue
+
+	// 2. Reset Queue
 	q.Updates = make(map[string]map[int]*models.TikTokAccount)
 	q.Appends = make(map[string][][]interface{})
+	q.MailUpdates = make(map[int]string) // Reset Mail Queue
 	q.Timer = nil
-	q.Unlock()
+	q.Unlock() // 🔓 Mở khóa để luồng chính tiếp tục nhận request
 
 	defer func() {
 		q.Lock()
@@ -117,26 +140,42 @@ func (q *QueueManager) Flush(isShutdown bool) {
 		q.Unlock()
 	}()
 
-	// 1. Xử lý Update (Batch Update)
+	// --- PHẦN 1: XỬ LÝ DATA QUEUE (Update & Append) ---
+	
+	// A. Update (Batch Update)
 	for sheetName, rowsMap := range pendingUpdates {
 		if len(rowsMap) == 0 { continue }
 		err := q.SheetSvc.BatchUpdateRows(q.SpreadsheetID, sheetName, rowsMap)
 		if err != nil {
 			log.Printf("❌ [FLUSH UPDATE ERROR] %s: %v", sheetName, err)
+			// TODO: Retry Logic nếu cần (như Node.js giữ lại Queue)
 		} else {
-			log.Printf("✅ [FLUSH] Đã cập nhật %d dòng vào %s", len(rowsMap), sheetName)
+			log.Printf("✅ [FLUSH DATA] Updated %d rows in %s", len(rowsMap), sheetName)
 		}
 	}
 
-	// 2. Xử lý Append (Log)
+	// B. Append (Log)
 	for sheetName, rowsList := range pendingAppends {
 		if len(rowsList) == 0 { continue }
-		// Dùng hàm AppendRawRows (đã thêm vào sheets/client.go)
+		// Dùng hàm AppendRawRows trong sheets/client.go
 		err := q.SheetSvc.AppendRawRows(q.SpreadsheetID, sheetName, rowsList)
 		if err != nil {
 			log.Printf("❌ [FLUSH APPEND ERROR] %s: %v", sheetName, err)
 		} else {
-			log.Printf("✅ [FLUSH] Đã thêm %d dòng vào %s", len(rowsList), sheetName)
+			log.Printf("✅ [FLUSH DATA] Appended %d rows in %s", len(rowsList), sheetName)
+		}
+	}
+
+	// --- PHẦN 2: XỬ LÝ MAIL QUEUE (Tách biệt hoàn toàn) ---
+	
+	// C. Mail Updates (Chỉ update cột H thành TRUE)
+	if len(pendingMails) > 0 {
+		// Gọi hàm BatchUpdateCells riêng cho Mail (đã thêm vào sheets/client.go)
+		err := q.SheetSvc.BatchUpdateCells(q.SpreadsheetID, "EmailLogger", pendingMails)
+		if err != nil {
+			log.Printf("❌ [FLUSH MAIL ERROR]: %v", err)
+		} else {
+			log.Printf("✅ [FLUSH MAIL] Marked %d emails as READ", len(pendingMails))
 		}
 	}
 }
