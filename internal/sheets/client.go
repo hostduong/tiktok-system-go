@@ -155,3 +155,38 @@ func (s *Service) AppendRawRows(spreadsheetID, sheetName string, rawRows [][]int
 	if err != nil { return fmt.Errorf("append raw error: %v", err) }
 	return nil
 }
+// FetchRawData: Đọc dữ liệu thô (Dùng cho EmailLogger)
+func (s *Service) FetchRawData(spreadsheetID, sheetName string, startRow, endRow int) ([][]interface{}, error) {
+	// Đọc từ cột A đến H (Cột 7) theo config Node.js
+	readRange := fmt.Sprintf("%s!A%d:H%d", sheetName, startRow, endRow)
+
+	resp, err := s.srv.Spreadsheets.Values.Get(spreadsheetID, readRange).Do()
+	if err != nil {
+		return nil, fmt.Errorf("google api error: %v", err)
+	}
+
+	return resp.Values, nil
+}
+
+// BatchUpdateCells: Cập nhật các ô cụ thể (Dùng để đánh dấu đã đọc Email)
+func (s *Service) BatchUpdateCells(spreadsheetID, sheetName string, updates map[int]string) error {
+	if len(updates) == 0 { return nil }
+
+	var data []*sheets.ValueRange
+	for rowIndex, val := range updates {
+		// Update cột H (Cột 7) là cột READ
+		rng := fmt.Sprintf("%s!H%d", sheetName, rowIndex)
+		data = append(data, &sheets.ValueRange{
+			Range:  rng,
+			Values: [][]interface{}{{val}},
+		})
+	}
+
+	rb := &sheets.BatchUpdateValuesRequest{
+		ValueInputOption: "RAW",
+		Data:             data,
+	}
+
+	_, err := s.srv.Spreadsheets.Values.BatchUpdate(spreadsheetID, rb).Do()
+	return err
+}
