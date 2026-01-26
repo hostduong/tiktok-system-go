@@ -139,3 +139,19 @@ func (s *Service) AppendRows(spreadsheetID, sheetName string, newAccounts []*mod
 
 	return nil
 }
+
+// AppendRawRows: Hỗ trợ ghi log dạng mảng thô (không qua Struct)
+func (s *Service) AppendRawRows(spreadsheetID, sheetName string, rawRows [][]interface{}) error {
+	if len(rawRows) == 0 { return nil }
+
+	rng := fmt.Sprintf("%s!A1", sheetName)
+	rb := &sheets.ValueRange{ Values: rawRows }
+
+	_, err := s.srv.Spreadsheets.Values.Append(spreadsheetID, rng, rb).
+		ValueInputOption("RAW").
+		InsertDataOption("INSERT_ROWS").
+		Do()
+
+	if err != nil { return fmt.Errorf("append raw error: %v", err) }
+	return nil
+}
