@@ -104,3 +104,24 @@ func CreateStandardNote(oldNote, newStatus, mode string) string {
 
 	return fmt.Sprintf("%s\n%s (Lần %d)", newStatus, nowFull, count)
 }
+
+// --- JSON Response Helpers ---
+
+func JSONResponse(w http.ResponseWriter, status, msg string, data map[string]interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	resp := map[string]interface{}{
+		"status":    status,
+		"messenger": msg,
+	}
+	if data != nil {
+		for k, v := range data {
+			resp[k] = v
+		}
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+func JSONResponseRaw(w http.ResponseWriter, data map[string]interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(data)
+}
