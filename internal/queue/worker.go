@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -9,44 +10,29 @@ import (
 	"tiktok-server/internal/sheets"
 )
 
-// TaskType định nghĩa loại công việc (Update hay Append)
-type TaskType int
-
-const (
-	TypeUpdate TaskType = iota
-	TypeAppend
-)
-
-// WriteTask đại diện cho 1 lệnh ghi
-type WriteTask struct {
-	Type      TaskType
-	SheetName string
-	RowIndex  int
-	Data      *models.TikTokAccount // Dùng cho Update
-	RawRow    []interface{}         // Dùng cho Append/Log (Linh hoạt)
-}
-
-// QueueManager quản lý hàng đợi cho từng Spreadsheet
+// QueueManager quản lý hàng đợi ghi cho từng Spreadsheet
 type QueueManager struct {
-	sync.Mutex // Khóa bảo vệ hàng đợi (Smart Lock: Chỉ khóa khi đẩy/lấy task)
+	sync.Mutex // Khóa bảo vệ hàng đợi
 
 	SpreadsheetID string
 	SheetSvc      *sheets.Service
 	
-	// Hàng đợi lưu trong RAM
-	Updates map[string]map[int]*models.TikTokAccount // [SheetName][RowIndex] -> Data
-	Appends map[string][][]interface{}               // [SheetName] -> List of Rows
+	// Lưu các dòng cần Update: Map[SheetName][RowIndex] -> Data
+	Updates map[string]map[int]*models.TikTokAccount
+	
+	// Lưu các dòng cần Append (Log): Map[SheetName] -> List of Rows
+	Appends map[string][][]interface{}
 
 	IsFlushing bool
 	Timer      *time.Timer
 }
 
-// GlobalQueues: Quản lý Queue cho nhiều file Sheet khác nhau
+// GlobalQueues: Quản lý nhiều file Sheet khác nhau
 var (
 	GlobalQueues = sync.Map{} // Map[SpreadsheetID]*QueueManager
 )
 
-// GetQueue lấy (hoặc tạo mới) Queue cho 1 file Sheet
+// GetQueue: Lấy (hoặc tạo) Queue cho 1 file Sheet
 func GetQueue(sid string, svc *sheets.Service) *QueueManager {
 	if val, ok := GlobalQueues.Load(sid); ok {
 		return val.(*QueueManager)
@@ -62,21 +48,21 @@ func GetQueue(sid string, svc *sheets.Service) *QueueManager {
 	return q
 }
 
-// EnqueueUpdate: Đẩy lệnh cập nhật vào hàng đợi (Thay thế queue_update của Node.js)
+// EnqueueUpdate: Đẩy lệnh update vào hàng đợi
 func (q *QueueManager) EnqueueUpdate(sheetName string, rowIndex int, data *models.TikTokAccount) {
-	q.Lock() // 🔒 Lock cực nhanh để nhét dữ liệu vào map
+	q.Lock()
 	defer q.Unlock()
 
 	if _, ok := q.Updates[sheetName]; !ok {
 		q.Updates[sheetName] = make(map[int]*models.TikTokAccount)
 	}
-	// Cơ chế đè: Nếu dòng này đang chờ update cũ, lệnh mới sẽ đè lên (Tối ưu)
+	// Cơ chế đè: Lệnh mới nhất sẽ thắng
 	q.Updates[sheetName][rowIndex] = data
 
 	q.checkTrigger()
 }
 
-// EnqueueAppend: Đẩy lệnh thêm mới (Log/Append)
+// EnqueueAppend: Đẩy lệnh thêm mới (Log)
 func (q *QueueManager) EnqueueAppend(sheetName string, rowData []interface{}) {
 	q.Lock()
 	defer q.Unlock()
@@ -85,27 +71,20 @@ func (q *QueueManager) EnqueueAppend(sheetName string, rowData []interface{}) {
 	q.checkTrigger()
 }
 
-// checkTrigger: Kiểm tra xem có cần xả hàng đợi không (Smart Piggyback Logic)
+// Smart Piggyback Logic: Kiểm tra xem có cần xả hàng ngay không
 func (q *QueueManager) checkTrigger() {
-	// Đếm tổng số lượng pending
 	total := 0
-	for _, m := range q.Updates {
-		total += len(m)
-	}
-	for _, l := range q.Appends {
-		total += len(l)
-	}
+	for _, m := range q.Updates { total += len(m) }
+	for _, l := range q.Appends { total += len(l) }
 
-	// Logic Node.js: Nếu > 100 dòng -> Ép xả ngay (Urgent Flush)
+	// Nếu > 100 dòng -> Ép xả ngay (Giống Node.js)
 	if total > 100 {
-		if q.Timer != nil {
-			q.Timer.Stop()
-		}
-		go q.Flush(false) // Chạy ngay lập tức
+		if q.Timer != nil { q.Timer.Stop() }
+		go q.Flush(false)
 		return
 	}
 
-	// Nếu chưa có timer, đặt hẹn giờ 3 giây
+	// Nếu chưa có timer -> Hẹn giờ 3 giây
 	if q.Timer == nil {
 		q.Timer = time.AfterFunc(3*time.Second, func() {
 			q.Flush(false)
@@ -113,7 +92,7 @@ func (q *QueueManager) checkTrigger() {
 	}
 }
 
-// Flush: Thực hiện ghi xuống Google Sheets (Nặng nhất)
+// Flush: Ghi dữ liệu xuống Google Sheets
 func (q *QueueManager) Flush(isShutdown bool) {
 	q.Lock()
 	if q.IsFlushing {
@@ -122,16 +101,15 @@ func (q *QueueManager) Flush(isShutdown bool) {
 	}
 	q.IsFlushing = true
 	
-	// Snapshot: Lấy dữ liệu ra khỏi hàng đợi để xử lý, giải phóng hàng đợi cho request mới
-	// Đây là kỹ thuật "Copy-on-Write" giúp giảm thời gian Lock
+	// Snapshot: Lấy dữ liệu ra để xử lý, giải phóng hàng đợi
 	pendingUpdates := q.Updates
 	pendingAppends := q.Appends
 	
-	// Reset hàng đợi
+	// Reset Queue
 	q.Updates = make(map[string]map[int]*models.TikTokAccount)
 	q.Appends = make(map[string][][]interface{})
 	q.Timer = nil
-	q.Unlock() // 🔓 Mở khóa ngay để luồng chính tiếp tục nhận request
+	q.Unlock()
 
 	defer func() {
 		q.Lock()
@@ -139,28 +117,26 @@ func (q *QueueManager) Flush(isShutdown bool) {
 		q.Unlock()
 	}()
 
-	// Bắt đầu gọi Google API (Tốn thời gian nhưng không chặn luồng chính)
-	
-	// 1. Xử lý Update
+	// 1. Xử lý Update (Batch Update)
 	for sheetName, rowsMap := range pendingUpdates {
 		if len(rowsMap) == 0 { continue }
-		// Gọi BatchUpdate bên sheets/client.go
 		err := q.SheetSvc.BatchUpdateRows(q.SpreadsheetID, sheetName, rowsMap)
 		if err != nil {
-			log.Printf("❌ [FLUSH ERROR] Update %s: %v", sheetName, err)
-			// TODO: Retry logic (Node.js có retry 5 lần, ở V2 Go ta có thể làm sau)
+			log.Printf("❌ [FLUSH UPDATE ERROR] %s: %v", sheetName, err)
 		} else {
-			log.Printf("✅ [FLUSH] Updated %d rows in %s", len(rowsMap), sheetName)
+			log.Printf("✅ [FLUSH] Đã cập nhật %d dòng vào %s", len(rowsMap), sheetName)
 		}
 	}
 
-	// 2. Xử lý Append
+	// 2. Xử lý Append (Log)
 	for sheetName, rowsList := range pendingAppends {
 		if len(rowsList) == 0 { continue }
-		// Chuyển đổi sang format model nếu cần, hoặc append raw
-		// Ở đây ta dùng AppendRowsRaw (Cần bổ sung vào sheets/client.go hoặc dùng logic append cũ)
-		// Để đơn giản, ta giả định client.go hỗ trợ append mảng thô.
-		// (Logic này khớp với xu_ly_gui_mail)
-		// ... Thực tế ta cần map lại struct hoặc viết hàm AppendRaw trong client.go
+		// Dùng hàm AppendRawRows (đã thêm vào sheets/client.go)
+		err := q.SheetSvc.AppendRawRows(q.SpreadsheetID, sheetName, rowsList)
+		if err != nil {
+			log.Printf("❌ [FLUSH APPEND ERROR] %s: %v", sheetName, err)
+		} else {
+			log.Printf("✅ [FLUSH] Đã thêm %d dòng vào %s", len(rowsList), sheetName)
+		}
 	}
 }
