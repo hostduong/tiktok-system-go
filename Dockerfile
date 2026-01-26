@@ -1,32 +1,24 @@
-# --- Giai đoạn 1: Build (Biên dịch) ---
+# --- Giai đoạn 1: Build & Fix Dependencies ---
 FROM golang:1.22-alpine as builder
+
+# Cài đặt git để tải thư viện
+RUN apk add --no-cache git
 
 # Tạo thư mục làm việc
 WORKDIR /app
 
-# Copy file quản lý thư viện trước để tận dụng cache
-COPY go.mod ./
-# COPY go.sum ./  <-- Bỏ comment dòng này khi bạn đã chạy 'go mod tidy' lần đầu
-
-# Tải thư viện (Nếu có)
-RUN go mod download
-
-# Copy toàn bộ code vào
+# Copy toàn bộ code vào trước (để go mod tidy quét được code)
 COPY . .
 
-# Build ra file chạy (Binary) tên là 'server'
-# CGO_ENABLED=0 giúp tạo file static binary chạy được trên mọi Linux
+# 🔥 MAGIC STEP: Tự động sửa lỗi thư viện
+# Lệnh này sẽ tự động thêm các thư viện thiếu và bỏ các thư viện thừa
+RUN go mod tidy
+
+# Build ra file chạy (Binary)
 RUN CGO_ENABLED=0 GOOS=linux go build -v -o server main.go
 
-# --- Giai đoạn 2: Run (Chạy thật) ---
-# Dùng ảnh 'distroless' cực nhẹ, bảo mật cao (không có shell, không cài được virus)
+# --- Giai đoạn 2: Run ---
 FROM gcr.io/distroless/static-debian12
-
-# Copy file binary từ giai đoạn 1 sang
 COPY --from=builder /app/server /server
-
-# Mở cổng 8080 (Thông báo thôi, Cloud Run tự quản lý)
 EXPOSE 8080
-
-# Chạy server
 CMD ["/server"]
