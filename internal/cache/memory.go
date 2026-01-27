@@ -8,10 +8,9 @@ import (
 	"tiktok-server/internal/models"
 )
 
-// SheetCacheItem: Lưu toàn bộ 1 file Excel trong RAM
+// SheetCacheItem: Lưu cache của 1 Sheet
 type SheetCacheItem struct {
 	sync.RWMutex
-
 	SpreadsheetID string
 	SheetName     string
 	Timestamp     time.Time
@@ -20,9 +19,10 @@ type SheetCacheItem struct {
 
 	RawValues []*models.TikTokAccount
 
-	// Các Index để tìm kiếm nhanh
-	IndexUserSec  map[string]int // Login Handler cần cái này
-	IndexUserName map[string]int // Login Handler cần cái này
+	// --- CÁC INDEX MỚI (Sửa theo yêu cầu của bạn) ---
+	IndexUserID map[string]int   // Tìm theo UserID (Cột 3)
+	IndexEmail  map[string]int   // Tìm theo Email (Cột 6)
+	IndexStatus map[string][]int // Tìm theo Status (Cột 0)
 }
 
 var GlobalSheets = sync.Map{}
@@ -35,12 +35,14 @@ func NewSheetCache(sid, name string) *SheetCacheItem {
 		LastAccessed:  time.Now(),
 		TTL:           5 * time.Minute,
 		RawValues:     make([]*models.TikTokAccount, 0),
-		IndexUserSec:  make(map[string]int),
-		IndexUserName: make(map[string]int),
+		// Khởi tạo map
+		IndexUserID: make(map[string]int),
+		IndexEmail:  make(map[string]int),
+		IndexStatus: make(map[string][]int),
 	}
 }
 
-// IsValid: Kiểm tra Cache còn hạn không
+// IsValid: Kiểm tra cache còn hạn không
 func (s *SheetCacheItem) IsValid() bool {
 	if len(s.RawValues) == 0 {
 		return false
@@ -48,27 +50,49 @@ func (s *SheetCacheItem) IsValid() bool {
 	return time.Since(s.LastAccessed) < s.TTL
 }
 
-// BuildIndex: Tạo chỉ mục tìm kiếm (Map)
+// BuildIndex: Xây dựng chỉ mục (Quan trọng)
 func (s *SheetCacheItem) BuildIndex() {
 	s.Lock()
 	defer s.Unlock()
 
-	s.IndexUserSec = make(map[string]int)
-	s.IndexUserName = make(map[string]int)
+	s.IndexUserID = make(map[string]int)
+	s.IndexEmail = make(map[string]int)
+	s.IndexStatus = make(map[string][]int)
 
 	for idx, acc := range s.RawValues {
-		// Index 1: User|Pass|Email
-		key := strings.ToLower(acc.UserId + "|" + acc.Password + "|" + acc.Email)
-		s.IndexUserSec[key] = idx
-
-		// Index 2: Username
-		if acc.UserName != "" {
-			s.IndexUserName[strings.ToLower(acc.UserName)] = idx
+		// 1. Index UserID
+		if acc.UserId != "" {
+			s.IndexUserID[acc.UserId] = idx
 		}
+		// 2. Index Email
+		if acc.Email != "" {
+			s.IndexEmail[strings.ToLower(acc.Email)] = idx
+		}
+		// 3. Index Status
+		st := acc.Status
+		s.IndexStatus[st] = append(s.IndexStatus[st], idx)
 	}
 }
 
-// OptimisticLockingCheck: Check khóa thiết bị
+// GetAccountByIndex: Lấy account an toàn
+func (s *SheetCacheItem) GetAccountByIndex(idx int) *models.TikTokAccount {
+	if idx >= 0 && idx < len(s.RawValues) {
+		return s.RawValues[idx]
+	}
+	return nil
+}
+
+// UpdateAccount: Cập nhật Account
+func (s *SheetCacheItem) UpdateAccount(idx int, newAcc *models.TikTokAccount) {
+	s.Lock()
+	defer s.Unlock()
+	if idx >= 0 && idx < len(s.RawValues) {
+		s.RawValues[idx] = newAcc
+		s.LastAccessed = time.Now()
+	}
+}
+
+// OptimisticLockingCheck: Check khóa thiết bị (Giữ nguyên logic của bạn)
 func (s *SheetCacheItem) OptimisticLockingCheck(reqDevice string, potentialIndexes []int) (bool, int) {
 	s.Lock()
 	defer s.Unlock()
@@ -97,22 +121,4 @@ func (s *SheetCacheItem) OptimisticLockingCheck(reqDevice string, potentialIndex
 	}
 
 	return false, -1
-}
-
-// GetAccountByIndex: Lấy account an toàn
-func (s *SheetCacheItem) GetAccountByIndex(idx int) *models.TikTokAccount {
-	if idx >= 0 && idx < len(s.RawValues) {
-		return s.RawValues[idx]
-	}
-	return nil
-}
-
-// UpdateAccount: Cập nhật Account trong cache
-func (s *SheetCacheItem) UpdateAccount(idx int, newAcc *models.TikTokAccount) {
-	s.Lock()
-	defer s.Unlock()
-	if idx >= 0 && idx < len(s.RawValues) {
-		s.RawValues[idx] = newAcc
-		s.LastAccessed = time.Now()
-	}
 }
