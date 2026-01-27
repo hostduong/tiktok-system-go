@@ -12,39 +12,38 @@ import (
 )
 
 func main() {
-	// 1. Cấu hình cổng (QUAN TRỌNG CHO CLOUD RUN)
+	// 1. Cấu hình cổng (Bắt buộc cho Cloud Run)
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	// Biến lưu lỗi khởi động
 	var initErr error
 	var authSvc *auth.Authenticator
 	var sheetSvc *sheets.Service
 
-	// 2. Khởi tạo Auth (Kết nối Database)
+	// 2. Khởi tạo Auth (Dùng Key JSON để check user bản quyền)
+	// Code này sẽ đọc biến môi trường FIREBASE_CREDENTIALS
 	authSvc, err := auth.NewAuthenticator()
 	if err != nil {
-		fmt.Printf("⚠️ LỖI AUTH: %v\n", err)
+		fmt.Printf("⚠️ LỖI AUTH (Firebase): %v\n", err)
 		initErr = err
 	}
 
-	// 3. Khởi tạo Sheets
+	// 3. Khởi tạo Sheets (Dùng quyền Server để đọc Excel)
 	if initErr == nil {
 		sheetSvc, err = sheets.NewService()
 		if err != nil {
-			fmt.Printf("⚠️ LỖI SHEETS: %v\n", err)
+			fmt.Printf("⚠️ LỖI SHEETS (Google API): %v\n", err)
 			initErr = err
 		}
 	}
 
-	// 4. Định tuyến Handler
+	// 4. Định tuyến (Router)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Chỉ nhận POST cho API chính
 		if r.Method == http.MethodPost {
-			// Đây là endpoint chính nhận mọi request (giống mainApi trong Node.js)
-			
-			// Nếu server đang lỗi cấu hình -> Trả về lỗi 500 JSON
+			// Nếu server đang lỗi cấu hình -> Báo lỗi JSON
 			if initErr != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
@@ -52,25 +51,18 @@ func main() {
 				return
 			}
 
-			// Routing dựa trên "type" trong body (Login, Update, ReadMail...)
-			// Tạm thời trỏ hết vào HandleLogin để test Auth trước, 
-			// Sau này bạn sẽ chia case trong file handlers
+			// Chuyển tiếp vào Handler xử lý chính
+			// Ở đây tôi trỏ tạm vào HandleLogin để test, sau này bạn dùng switch-case type
 			handlers.HandleLogin(w, r, authSvc, sheetSvc)
 			return
 		}
 
-		// GET Request (Trình duyệt)
+		// GET Request (Trang chủ kiểm tra sức khỏe server)
 		if initErr != nil {
 			fmt.Fprintf(w, "❌ SERVER LỖI: %v", initErr)
 		} else {
-			w.Write([]byte("TikTok Server V243 (Go Edition) is Running! 🚀"))
+			w.Write([]byte("TikTok Server V243 (Go Hybrid Auth) is Running! 🚀"))
 		}
-	})
-
-	// Endpoint phụ (nếu cần)
-	http.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
-		if initErr != nil { http.Error(w, "Config Error", 500); return }
-		handlers.HandleLogin(w, r, authSvc, sheetSvc)
 	})
 
 	log.Printf("🚀 Server đang lắng nghe port :%s", port)
