@@ -1,5 +1,6 @@
 # --- Giai đoạn 1: Build & Fix Dependencies ---
-FROM golang:1.22-alpine as builder
+# 🔥 SỬA Ở ĐÂY: Đổi từ 1.22 thành 1.24
+FROM golang:1.24-alpine as builder
 
 # Cài git
 RUN apk add --no-cache git
@@ -10,13 +11,12 @@ WORKDIR /app
 COPY . .
 
 # 🔥 MAGIC FIX:
-# 1. Xóa file go.sum cũ (nếu có) để tránh xung đột checksum
-# 2. Xóa file go.mod cũ và tạo mới lại (để chắc chắn không còn rác)
+# Xóa file cũ và khởi tạo lại module
 RUN rm -f go.sum
 RUN rm -f go.mod
 RUN go mod init tiktok-server
 
-# 3. Tự động tìm và tải thư viện dựa trên code thực tế (import)
+# Tự động tìm và tải thư viện (Lúc này nó sẽ dùng Go 1.24 nên sẽ tải được thư viện Google mới)
 RUN go mod tidy
 
 # Build
