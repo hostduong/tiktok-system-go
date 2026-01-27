@@ -1,10 +1,13 @@
 package models
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // TikTokAccount đại diện cho 1 dòng dữ liệu trong Sheet (61 cột)
 type TikTokAccount struct {
-	// Metadata để quản lý vị trí dòng (không lưu trong Sheet)
+	// Metadata
 	RowIndex int `json:"row_index"`
 
 	// --- NHÓM 1: AUTH & INFO (Cột 0 -> 22) ---
@@ -73,15 +76,22 @@ type TikTokAccount struct {
 	BannedKeywords    string `json:"banned_keywords" col:"58"`
 	ContentLanguage   string `json:"content_language" col:"59"`
 	Country           string `json:"country" col:"60"`
+
+	// --- QUAN TRỌNG: Để tránh lỗi biên dịch trong update.go ---
+	ExtraData []string `json:"-"`
 }
 
 // NewAccount tạo một account rỗng
 func NewAccount() *TikTokAccount {
-	return &TikTokAccount{}
+	return &TikTokAccount{
+		ExtraData: make([]string, 61), // Khởi tạo mảng đệm
+	}
 }
 
-// ToSlice chuyển đổi Struct thành mảng []interface{} để ghi xuống Google Sheets
+// ToSlice chuyển đổi Struct thành mảng []interface{}
 func (a *TikTokAccount) ToSlice() []interface{} {
+	// Cập nhật lại ExtraData từ các trường struct (Sync ngược)
+	// (Logic đơn giản: tạo mảng mới từ các trường hiện tại)
 	return []interface{}{
 		a.Status, a.Note, a.DeviceId, a.UserId, a.UserSec, a.UserName, a.Email,
 		a.NickName, a.Password, a.PasswordEmail, a.RecoveryEmail, a.TwoFA, a.Phone,
@@ -103,10 +113,16 @@ func (a *TikTokAccount) FromSlice(row []interface{}) {
 		if i >= len(row) {
 			return ""
 		}
-		// Ép kiểu an toàn, tránh panic nếu sheet trả về số thay vì chuỗi
 		return fmt.Sprintf("%v", row[i])
 	}
 
+	// Đổ dữ liệu vào ExtraData trước (để backup)
+	a.ExtraData = make([]string, 61)
+	for i := 0; i < 61; i++ {
+		a.ExtraData[i] = getString(i)
+	}
+
+	// Map vào từng trường cụ thể
 	a.Status = getString(0)
 	a.Note = getString(1)
 	a.DeviceId = getString(2)
