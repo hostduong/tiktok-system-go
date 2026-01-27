@@ -5,7 +5,6 @@ import (
 	"fmt"
 	
 	"google.golang.org/api/sheets/v4"
-    // Lưu ý: Không cần import "google.golang.org/api/option" vì ta dùng quyền mặc định của Server
 )
 
 type Service struct {
@@ -13,13 +12,11 @@ type Service struct {
 }
 
 // NewService: Khởi tạo kết nối Google Sheets
-// 🔥 ĐIỂM QUAN TRỌNG: Hàm này KHÔNG nhận tham số credentials nữa.
-// Nó sẽ tự động lấy "Căn Cước" của Cloud Run (My First Project) để đi làm việc.
+// 🔥 KHÔNG CẦN TRUYỀN KEY JSON. Tự động dùng quyền của Server (Cloud Run)
 func NewService() (*Service, error) {
 	ctx := context.Background()
 	
-	// Tương đương Node.js: const auth = new google.auth.GoogleAuth(...)
-	// Go sẽ tự tìm quyền của Server (ADC - Application Default Credentials)
+	// Tự động tìm "Application Default Credentials" của Server
 	srv, err := sheets.NewService(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("lỗi khởi tạo Sheets Service (ADC): %v", err)
@@ -28,9 +25,9 @@ func NewService() (*Service, error) {
 	return &Service{srv: srv}, nil
 }
 
-// FetchData: Hàm đọc dữ liệu (Logic giữ nguyên)
+// FetchData: Đọc dữ liệu từ Sheet
 func (s *Service) FetchData(spreadsheetID, sheetName string, startRow, endRow int) ([][]interface{}, error) {
-	// Đọc từ cột A đến cột BI (giống Node.js LIMIT_COL_FULL: "BI")
+	// Đọc từ cột A đến cột BI (Limit Col Full)
 	readRange := fmt.Sprintf("'%s'!A%d:BI%d", sheetName, startRow, endRow)
 	
 	resp, err := s.srv.Spreadsheets.Values.Get(spreadsheetID, readRange).ValueRenderOption("UNFORMATTED_VALUE").Do()
@@ -40,7 +37,7 @@ func (s *Service) FetchData(spreadsheetID, sheetName string, startRow, endRow in
 	return resp.Values, nil
 }
 
-// BatchUpdate: Hàm ghi dữ liệu (Logic giữ nguyên)
+// BatchUpdate: Cập nhật nhiều dòng
 func (s *Service) BatchUpdate(spreadsheetID string, requests []*sheets.ValueRange) error {
 	rb := &sheets.BatchUpdateValuesRequest{
 		ValueInputOption: "RAW",
@@ -50,12 +47,12 @@ func (s *Service) BatchUpdate(spreadsheetID string, requests []*sheets.ValueRang
 	return err
 }
 
-// Append: Hàm thêm dòng mới (Logic giữ nguyên)
+// Append: Thêm dòng mới
 func (s *Service) Append(spreadsheetID, sheetName string, values [][]interface{}) error {
-    rangeVal := fmt.Sprintf("'%s'!A1", sheetName)
-    rb := &sheets.ValueRange{
-        Values: values,
-    }
-    _, err := s.srv.Spreadsheets.Values.Append(spreadsheetID, rangeVal, rb).ValueInputOption("RAW").InsertDataOption("INSERT_ROWS").Do()
-    return err
+	rangeVal := fmt.Sprintf("'%s'!A1", sheetName)
+	rb := &sheets.ValueRange{
+		Values: values,
+	}
+	_, err := s.srv.Spreadsheets.Values.Append(spreadsheetID, rangeVal, rb).ValueInputOption("RAW").InsertDataOption("INSERT_ROWS").Do()
+	return err
 }
