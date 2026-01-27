@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -73,9 +72,6 @@ func (a *Authenticator) VerifyToken(token string) (bool, *TokenData, string) {
 	// Xử lý hạn sử dụng ĐA NĂNG
 	expireTime := parseExpiration(data.Expired)
 	
-	// Debug log: in ra để bạn kiểm tra server hiểu ngày thế nào
-	// log.Printf("Token Check: Input=%v -> Parsed=%d (Now=%d)", data.Expired, expireTime, time.Now().UnixMilli())
-
 	if expireTime == 0 {
 		return false, nil, "Lỗi định dạng ngày hết hạn"
 	}
@@ -138,7 +134,6 @@ func parseExpiration(val interface{}) int64 {
 			t := time.Date(y, time.Month(m), d, h, min, sec, 0, time.UTC)
 
 			// Trừ 7 tiếng (25200000 ms) để đưa về đúng mốc thời gian VN
-			// (Vì server hiểu t là UTC, nhưng thực tế input là GMT+7)
 			return t.UnixMilli() - 25200000
 		}
 	}
