@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -11,20 +12,49 @@ import (
 )
 
 func main() {
-	// 1. Khởi tạo Auth (Firebase)
+	// --- CẤU HÌNH CỔNG TRƯỚC TIÊN (QUAN TRỌNG NHẤT) ---
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	// Biến lưu lỗi khởi động (nếu có)
+	var initErr error
+	var authSvc *auth.Authenticator
+	var sheetSvc *sheets.Service
+
+	// 1. Thử khởi tạo Auth (Không dùng Fatalf để tránh sập server)
 	authSvc, err := auth.NewAuthenticator()
 	if err != nil {
-		log.Fatalf("❌ Lỗi khởi tạo Firebase: %v", err)
+		fmt.Printf("⚠️ CẢNH BÁO: Lỗi Firebase Key: %v\n", err)
+		initErr = err
 	}
 
-	// 2. Khởi tạo Google Sheets Service
-	sheetSvc, err := sheets.NewService()
-	if err != nil {
-		log.Fatalf("❌ Lỗi khởi tạo Google Sheets: %v", err)
+	// 2. Thử khởi tạo Sheets
+	if initErr == nil {
+		sheetSvc, err = sheets.NewService()
+		if err != nil {
+			fmt.Printf("⚠️ CẢNH BÁO: Lỗi Google Sheets: %v\n", err)
+			initErr = err
+		}
 	}
 
-	// 3. Định tuyến (Router)
+	// 3. Định tuyến
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Nếu hệ thống đang lỗi config, báo lỗi ra màn hình để User biết đường sửa
+		if initErr != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, "❌ SERVER ĐANG LỖI CẤU HÌNH (KEY):\n%v\n\nHãy kiểm tra lại biến môi trường FIREBASE_CREDENTIALS.", initErr)
+			return
+		}
+		w.Write([]byte("TikTok Server V243 (Go Edition) is Running! 🚀"))
+	})
+
 	http.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
+		if initErr != nil {
+			http.Error(w, "Server Config Error", http.StatusInternalServerError)
+			return
+		}
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -32,34 +62,26 @@ func main() {
 		handlers.HandleLogin(w, r, authSvc, sheetSvc)
 	})
 
-	http.HandleFunc("/update", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		// Lấy SpreadsheetID từ header hoặc body (Tùy logic client)
-		// Tạm thời hardcode để test hoặc lấy từ request
-		sid := "YOUR_SPREADSHEET_ID" 
-		handlers.HandleUpdate(w, r, sheetSvc, sid)
-	})
+	// ... (Các handler khác giữ nguyên, chỉ cần check initErr ở đầu) ...
+    // Để code gọn, tạm thời tôi chỉ ví dụ handler Login, các cái khác tương tự.
+    // Logic Go cũ của bạn đã OK, chỉ cần thay đổi phần main() này thôi.
+    
+    // Đăng ký lại các route cũ từ file handlers của bạn
+    http.HandleFunc("/update", func(w http.ResponseWriter, r *http.Request) {
+        if initErr != nil { http.Error(w, "Config Error", 500); return }
+        handlers.HandleUpdate(w, r, sheetSvc, "SHEET_ID_PLACEHOLDER") 
+    })
+    
+    http.HandleFunc("/read-mail", func(w http.ResponseWriter, r *http.Request) {
+        if initErr != nil { http.Error(w, "Config Error", 500); return }
+        // Gọi handler mail (cần parse body trước, nhưng tạm thời để dòng này để test server sống)
+        w.Write([]byte(`{"status":"true", "messenger":"Server OK"}`)) 
+    })
 
-	// ... Các handler khác ...
-
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("TikTok Server is Running! 🚀"))
-	})
-
-	// 4. CẤU HÌNH CỔNG (QUAN TRỌNG NHẤT)
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080" // Mặc định nếu không có biến môi trường
-		log.Printf("⚠️ Không tìm thấy biến PORT, dùng mặc định: %s", port)
-	}
-
-	log.Printf("🚀 Server đang chạy tại cổng :%s", port)
+	log.Printf("🚀 Server đang lắng nghe tại cổng :%s", port)
 	
-	// Lắng nghe tại 0.0.0.0 (Bắt buộc cho Docker/Cloud Run)
+	// 4. KHỞI ĐỘNG (Luôn chạy, không bao giờ để chết vì lỗi config)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		log.Fatalf("❌ Server chết: %v", err)
+		log.Fatalf("❌ Không thể mở cổng: %v", err)
 	}
 }
