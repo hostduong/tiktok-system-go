@@ -18,13 +18,13 @@ type Service struct {
 func NewService() (*Service, error) {
 	ctx := context.Background()
 
-	// 1. Lấy Key từ biến môi trường (Dùng chung Key với Firebase)
+	// 1. Lấy Key từ biến môi trường
 	credJSON := os.Getenv("FIREBASE_CREDENTIALS")
 	if credJSON == "" {
 		return nil, fmt.Errorf("biến môi trường FIREBASE_CREDENTIALS đang rỗng")
 	}
 
-	// 2. Kết nối Sheets API bằng Key JSON đó
+	// 2. Kết nối Sheets API
 	srv, err := sheets.NewService(ctx, option.WithCredentialsJSON([]byte(credJSON)))
 	if err != nil {
 		return nil, fmt.Errorf("unable to retrieve Sheets client: %v", err)
@@ -33,7 +33,7 @@ func NewService() (*Service, error) {
 	return &Service{srv: srv}, nil
 }
 
-// FetchData: Lấy dữ liệu và map vào Struct (Dùng cho Login/DataTiktok)
+// FetchData: Lấy dữ liệu và map vào Struct
 func (s *Service) FetchData(spreadsheetID, sheetName string, startRow, endRow int) ([]*models.TikTokAccount, error) {
 	readRange := fmt.Sprintf("%s!A%d:BI%d", sheetName, startRow, endRow) // BI là cột 61
 
@@ -45,26 +45,29 @@ func (s *Service) FetchData(spreadsheetID, sheetName string, startRow, endRow in
 	var accounts []*models.TikTokAccount
 	for i, row := range resp.Values {
 		acc := models.NewAccount()
-		// Chuyển row ( []interface{} ) thành []string
-		strRow := make([]string, 61)
+		
+		// --- SỬA LỖI TẠI ĐÂY ---
+		// Thay vì []string, ta tạo []interface{} để khớp với hàm FromSlice
+		paddedRow := make([]interface{}, 61)
 		for j := 0; j < 61; j++ {
 			if j < len(row) {
-				strRow[j] = fmt.Sprintf("%v", row[j])
+				paddedRow[j] = row[j]
 			} else {
-				strRow[j] = ""
+				paddedRow[j] = ""
 			}
 		}
-		acc.FromSlice(strRow)
-		acc.RowIndex = startRow + i // Lưu lại dòng thực tế
+		
+		acc.FromSlice(paddedRow)
+		acc.RowIndex = startRow + i
 		accounts = append(accounts, acc)
 	}
 
 	return accounts, nil
 }
 
-// FetchRawData: Lấy dữ liệu thô (Dùng cho EmailLogger - Mail)
+// FetchRawData: Lấy dữ liệu thô (Dùng cho EmailLogger)
 func (s *Service) FetchRawData(spreadsheetID, sheetName string, startRow, endRow int) ([][]interface{}, error) {
-	readRange := fmt.Sprintf("%s!A%d:H%d", sheetName, startRow, endRow) // Lấy đến cột H
+	readRange := fmt.Sprintf("%s!A%d:H%d", sheetName, startRow, endRow)
 
 	resp, err := s.srv.Spreadsheets.Values.Get(spreadsheetID, readRange).Do()
 	if err != nil {
@@ -74,7 +77,7 @@ func (s *Service) FetchRawData(spreadsheetID, sheetName string, startRow, endRow
 	return resp.Values, nil
 }
 
-// BatchUpdateRows: Cập nhật nhiều dòng cùng lúc (Dùng cho DataTiktok)
+// BatchUpdateRows: Cập nhật nhiều dòng
 func (s *Service) BatchUpdateRows(spreadsheetID, sheetName string, updates map[int]*models.TikTokAccount) error {
 	if len(updates) == 0 {
 		return nil
@@ -104,7 +107,7 @@ func (s *Service) BatchUpdateRows(spreadsheetID, sheetName string, updates map[i
 	return err
 }
 
-// AppendRawRows: Thêm dòng mới (Dùng cho Log/Append)
+// AppendRawRows: Thêm dòng mới
 func (s *Service) AppendRawRows(spreadsheetID, sheetName string, rows [][]interface{}) error {
 	rng := fmt.Sprintf("%s!A1", sheetName)
 	rb := &sheets.ValueRange{
@@ -118,7 +121,7 @@ func (s *Service) AppendRawRows(spreadsheetID, sheetName string, rows [][]interf
 	return err
 }
 
-// BatchUpdateCells: Cập nhật từng ô lẻ (Dùng cho Mail - đánh dấu đã đọc)
+// BatchUpdateCells: Cập nhật từng ô lẻ
 func (s *Service) BatchUpdateCells(spreadsheetID, sheetName string, updates map[int]string) error {
 	if len(updates) == 0 {
 		return nil
@@ -126,7 +129,6 @@ func (s *Service) BatchUpdateCells(spreadsheetID, sheetName string, updates map[
 
 	var data []*sheets.ValueRange
 	for rowIndex, val := range updates {
-		// Update cột H (Cột 7)
 		rng := fmt.Sprintf("%s!H%d", sheetName, rowIndex)
 		data = append(data, &sheets.ValueRange{
 			Range:  rng,
