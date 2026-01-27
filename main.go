@@ -1,204 +1,183 @@
-package main
+package handlers
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
-	"log"
+	"fmt"
 	"net/http"
-	"os"
-	"os/signal"
+	"strings"
 	"sync"
-	"syscall"
 	"time"
 
-	"tiktok-server/internal/auth"
-	"tiktok-server/internal/handlers"
 	"tiktok-server/internal/queue"
 	"tiktok-server/internal/sheets"
 	"tiktok-server/pkg/utils"
 )
 
-// --- CẤU HÌNH ---
-const (
-	GlobalMaxReq = 1000 // 1000 req/s
-	TokenMaxReq  = 5    // 5 req/s/token
-)
+const MailCacheTTL = 10 * time.Second
 
-// --- RATE LIMITER ---
-type RateLimiter struct {
-	sync.Mutex
-	GlobalCount int
-	LastReset   time.Time
-	TokenStats  map[string]*TokenStat
+type MailCacheItem struct {
+	Data      map[string]interface{}
+	ExpiresAt time.Time
 }
 
-type TokenStat struct {
-	Count    int
-	LastSeen time.Time
-	BanUntil time.Time
+var GlobalMailCache = sync.Map{}
+
+type ReadMailRequest struct {
+	Type    string `json:"type"`
+	Token   string `json:"token"`
+	Email   string `json:"email"`
+	Keyword string `json:"keyword"`
+	Read    string `json:"read"`
 }
 
-var limiter = &RateLimiter{
-	TokenStats: make(map[string]*TokenStat),
-	LastReset:  time.Now(),
-}
-
-// --- MAIN ---
-func main() {
-	log.Println("🔌 Đang khởi động TikTok Server V300 (Go)...")
-	
-	// 1. Khởi tạo Services
-	authSvc, err := auth.NewAuthenticator()
-	if err != nil { log.Fatalf("❌ Lỗi Firebase: %v", err) }
-
-	sheetSvc, err := sheets.NewService()
-	if err != nil { log.Fatalf("❌ Lỗi Google Sheets: %v", err) }
-
-	port := os.Getenv("PORT")
-	if port == "" { port = "8080" }
-
-	// 2. Routing
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		mainHandler(w, r, authSvc, sheetSvc)
-	})
-
-	// 3. Graceful Shutdown
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-c
-		log.Println("🛑 [SHUTDOWN] Đang tắt server. Ép xả toàn bộ hàng đợi...")
-		var wg sync.WaitGroup
-		queue.GlobalQueues.Range(func(key, value interface{}) bool {
-			q := value.(*queue.QueueManager)
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				q.Flush(true) // Force flush
-			}()
-			return true
-		})
-		
-		done := make(chan struct{})
-		go func() { wg.Wait(); close(done) }()
-
-		select {
-		case <-done: log.Println("✅ [SUCCESS] Dữ liệu đã an toàn.")
-		case <-time.After(8 * time.Second): log.Println("⚠️ [TIMEOUT] Hết giờ! Buộc phải tắt.")
-		}
-		os.Exit(0)
-	}()
-
-	log.Printf("🚀 Server đang chạy tại port %s", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil { log.Fatal(err) }
-}
-
-// --- HANDLER ---
-func mainHandler(w http.ResponseWriter, r *http.Request, authSvc *auth.Authenticator, sheetSvc *sheets.Service) {
-	// CORS
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	if r.Method == http.MethodOptions {
-		w.Header().Set("Access-Control-Allow-Methods", "POST")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+func HandleReadMail(w http.ResponseWriter, r *http.Request, sheetSvc *sheets.Service, spreadsheetId string) {
+	var body ReadMailRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		return
 	}
 
-	// Global Rate Limit
-	if !checkGlobalLimit() {
-		http.Error(w, `{"status":"false","messenger":"Server busy (503)"}`, 503)
-		return
-	}
+	email := utils.NormalizeString(body.Email)
+	keyword := utils.NormalizeString(body.Keyword)
+	markRead := (strings.ToLower(strings.TrimSpace(body.Read)) == "true")
 
-	// Đọc Body
-	bodyBytes, _ := io.ReadAll(r.Body)
-	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-
-	var baseReq struct {
-		Type     string `json:"type"`
-		Token    string `json:"token"`
-		DeviceId string `json:"deviceId"`
-	}
-	if err := json.Unmarshal(bodyBytes, &baseReq); err != nil {
-		utils.JSONResponse(w, "false", "JSON Error", nil)
-		return
-	}
-
-	// Auth & Routing
-	if baseReq.Type != "updated_cache" {
-		if !checkTokenLimit(baseReq.Token) {
-			utils.JSONResponse(w, "false", "Token bị giới hạn (Spam)", nil)
+	cacheKey := fmt.Sprintf("%s_%s_%s", spreadsheetId, email, keyword)
+	if val, ok := GlobalMailCache.Load(cacheKey); ok {
+		item := val.(MailCacheItem)
+		if time.Now().Before(item.ExpiresAt) {
+			utils.JSONResponseRaw(w, item.Data)
 			return
 		}
+		GlobalMailCache.Delete(cacheKey)
+	}
 
-		isValid, tokenData, msg := authSvc.VerifyToken(baseReq.Token)
-		if !isValid {
-			utils.JSONResponse(w, "false", msg, nil)
-			return
-		}
-		sid := tokenData.SpreadsheetID
+	limitTime := time.Now().Add(-60 * time.Minute)
+	startRow := 112
+	rawRows, err := sheetSvc.FetchRawData(spreadsheetId, "EmailLogger", startRow, startRow+500)
+	if err != nil {
+		utils.JSONResponse(w, "false", "Lỗi đọc mail", nil)
+		return
+	}
 
-		switch baseReq.Type {
-		case "login", "register", "auto", "view":
-			if baseReq.DeviceId == "" {
-				utils.JSONResponse(w, "false", "Thiếu deviceId", nil)
-				return
+	var resultData map[string]interface{}
+
+	if keyword != "" {
+		for i := len(rawRows) - 1; i >= 0; i-- {
+			row := rawRows[i]
+			if len(row) < 8 {
+				continue
 			}
-			handlers.HandleLogin(w, r, sheetSvc, sid)
 
-		case "updated":
-			handlers.HandleUpdate(w, r, sheetSvc, sid)
+			dateStr := fmt.Sprintf("%v", row[0])
+			mailTime := parseExcelTime(dateStr)
+			if mailTime.Before(limitTime) {
+				break
+			}
 
-		case "log_data":
-			handlers.HandleLogData(w, r, sheetSvc, sid)
-			
-		case "create_sheets":
-			handlers.HandleCreateSheets(w, r, sheetSvc, map[string]interface{}{"spreadsheetId": sid})
+			code := fmt.Sprintf("%v", row[6])
+			if code == "" {
+				continue
+			}
 
-		case "read_mail":
-			// 🔥 Đã trỏ đúng vào hàm HandleReadMail (file mail.go)
-			handlers.HandleReadMail(w, r, sheetSvc, sid)
+			isRead := strings.ToLower(fmt.Sprintf("%v", row[7])) == "true"
+			if isRead {
+				continue
+			}
 
-		default:
-			utils.JSONResponse(w, "false", "Type không hợp lệ", nil)
+			rowReceiver := utils.NormalizeString(fmt.Sprintf("%v", row[2]))
+			rowSender := utils.NormalizeString(fmt.Sprintf("%v", row[3]))
+
+			if rowReceiver == email && strings.Contains(rowSender, keyword) {
+				if markRead {
+					q := queue.GetQueue(spreadsheetId, sheetSvc)
+					q.EnqueueMailUpdate(startRow + i)
+				}
+
+				emailObj := map[string]interface{}{
+					"date":           row[0],
+					"sender_name":    row[1],
+					"receiver_email": row[2],
+					"sender_email":   row[3],
+					"subject":        row[4],
+					"body":           row[5],
+					"code":           row[6],
+				}
+				resultData = map[string]interface{}{
+					"status":    "true",
+					"messenger": "Lấy mã xác minh thành công",
+					"email":     emailObj,
+				}
+				break
+			}
 		}
 	} else {
-		handlers.HandleUpdatedCache(w, r, sheetSvc)
+		resultList := make(map[string]interface{})
+		count := 0
+		processed := 0
+		for i := len(rawRows) - 1; i >= 0; i-- {
+			if processed >= 500 {
+				break
+			}
+			processed++
+
+			row := rawRows[i]
+			if len(row) < 8 {
+				continue
+			}
+
+			dateStr := fmt.Sprintf("%v", row[0])
+			if parseExcelTime(dateStr).Before(limitTime) {
+				break
+			}
+
+			isRead := strings.ToLower(fmt.Sprintf("%v", row[7])) == "true"
+			if isRead {
+				continue
+			}
+
+			rowReceiver := utils.NormalizeString(fmt.Sprintf("%v", row[2]))
+			if rowReceiver != email {
+				continue
+			}
+
+			resultList[fmt.Sprintf("%d", count)] = map[string]interface{}{
+				"date":           row[0],
+				"sender_name":    row[1],
+				"receiver_email": row[2],
+				"sender_email":   row[3],
+				"subject":        row[4],
+				"body":           row[5],
+				"code":           row[6],
+			}
+			count++
+			if count >= 100 {
+				break
+			}
+		}
+		if count > 0 {
+			resultData = map[string]interface{}{
+				"status":    "true",
+				"messenger": "Lấy danh sách email thành công",
+				"email":     resultList,
+			}
+		}
 	}
+
+	if resultData == nil {
+		resultData = map[string]interface{}{
+			"status":    "true",
+			"messenger": "Không tìm thấy mail phù hợp",
+			"email":     map[string]interface{}{},
+		}
+	}
+
+	GlobalMailCache.Store(cacheKey, MailCacheItem{
+		Data:      resultData,
+		ExpiresAt: time.Now().Add(MailCacheTTL),
+	})
+
+	utils.JSONResponseRaw(w, resultData)
 }
 
-// --- HELPER ---
-func checkGlobalLimit() bool {
-	limiter.Lock(); defer limiter.Unlock()
-	now := time.Now()
-	if now.Sub(limiter.LastReset) > time.Second {
-		limiter.GlobalCount = 0; limiter.LastReset = now
-	}
-	limiter.GlobalCount++
-	return limiter.GlobalCount <= GlobalMaxReq
-}
-
-func checkTokenLimit(token string) bool {
-	limiter.Lock(); defer limiter.Unlock()
-	now := time.Now()
-	stat, exists := limiter.TokenStats[token]
-	if !exists {
-		stat = &TokenStat{LastSeen: now}
-		limiter.TokenStats[token] = stat
-	}
-	if !stat.BanUntil.IsZero() && now.Before(stat.BanUntil) { return false }
-	if now.Sub(stat.LastSeen) > time.Second {
-		stat.Count = 0; stat.LastSeen = now
-	}
-	stat.Count++
-	if stat.Count > TokenMaxReq {
-		stat.BanUntil = now.Add(5 * time.Minute)
-		return false
-	}
-	return true
+func parseExcelTime(v string) time.Time {
+	return time.Now()
 }
