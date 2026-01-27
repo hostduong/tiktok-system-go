@@ -5,160 +5,66 @@ import (
 	"fmt"
 	"os"
 
-	"tiktok-server/internal/models"
-
 	"google.golang.org/api/option"
 	"google.golang.org/api/sheets/v4"
+
+	"tiktok-server/internal/models"
 )
 
-// Service đóng gói Google Sheets API Client
 type Service struct {
 	srv *sheets.Service
 }
 
-// NewService khởi tạo kết nối Google Sheets
-// Nó sẽ đọc biến môi trường FIREBASE_CREDENTIALS (chứa JSON key)
 func NewService() (*Service, error) {
 	ctx := context.Background()
-	
-	// Lấy JSON Key từ biến môi trường (Giống Node.js process.env.FIREBASE_CREDENTIALS)
-	credsJSON := os.Getenv("FIREBASE_CREDENTIALS")
-	if credsJSON == "" {
-		return nil, fmt.Errorf("missing env var: FIREBASE_CREDENTIALS")
+
+	// 1. Lấy Key từ biến môi trường (Dùng chung Key với Firebase)
+	credJSON := os.Getenv("FIREBASE_CREDENTIALS")
+	if credJSON == "" {
+		return nil, fmt.Errorf("biến môi trường FIREBASE_CREDENTIALS đang rỗng")
 	}
 
-	// Tạo Client Google
-	srv, err := sheets.NewService(ctx, option.WithCredentialsJSON([]byte(credsJSON)))
+	// 2. Kết nối Sheets API bằng Key JSON đó
+	srv, err := sheets.NewService(ctx, option.WithCredentialsJSON([]byte(credJSON)))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create sheets service: %v", err)
+		return nil, fmt.Errorf("unable to retrieve Sheets client: %v", err)
 	}
 
 	return &Service{srv: srv}, nil
 }
 
-// FetchData: Đọc dữ liệu từ Sheet và chuyển đổi sang Struct
+// FetchData: Lấy dữ liệu và map vào Struct (Dùng cho Login/DataTiktok)
 func (s *Service) FetchData(spreadsheetID, sheetName string, startRow, endRow int) ([]*models.TikTokAccount, error) {
-	// 1. Định nghĩa vùng đọc (Ví dụ: DataTiktok!A11:BI10000)
-	// Cột BI là cột thứ 61
-	readRange := fmt.Sprintf("%s!A%d:BI%d", sheetName, startRow, endRow)
+	readRange := fmt.Sprintf("%s!A%d:BI%d", sheetName, startRow, endRow) // BI là cột 61
 
-	// 2. Gọi API Google (Đọc thô)
 	resp, err := s.srv.Spreadsheets.Values.Get(spreadsheetID, readRange).Do()
 	if err != nil {
-		return nil, fmt.Errorf("google api error: %v", err)
+		return nil, err
 	}
 
-	// 3. Chuyển đổi dữ liệu (Mapping)
 	var accounts []*models.TikTokAccount
-	
-	// Nếu không có dữ liệu, trả về mảng rỗng
-	if len(resp.Values) == 0 {
-		return accounts, nil
-	}
-
 	for i, row := range resp.Values {
-		// Tạo account mới
 		acc := models.NewAccount()
-		
-		// Map dữ liệu thô vào Struct (Logic nằm bên models/account.go)
-		acc.FromSlice(row)
-		
-		// Gán RowIndex thực tế (Dùng để update sau này)
-		acc.RowIndex = startRow + i
-		
+		// Chuyển row ( []interface{} ) thành []string
+		strRow := make([]string, 61)
+		for j := 0; j < 61; j++ {
+			if j < len(row) {
+				strRow[j] = fmt.Sprintf("%v", row[j])
+			} else {
+				strRow[j] = ""
+			}
+		}
+		acc.FromSlice(strRow)
+		acc.RowIndex = startRow + i // Lưu lại dòng thực tế
 		accounts = append(accounts, acc)
 	}
 
 	return accounts, nil
 }
 
-// BatchUpdateRows: Cập nhật nhiều dòng cùng lúc (Tối ưu API call)
-// Input: Map[RowIndex] -> AccountData
-func (s *Service) BatchUpdateRows(spreadsheetID, sheetName string, updates map[int]*models.TikTokAccount) error {
-	if len(updates) == 0 {
-		return nil
-	}
-
-	var data []*sheets.ValueRange
-
-	// Duyệt qua danh sách cần update
-	for rowIndex, acc := range updates {
-		// Chuyển Struct thành Mảng thô
-		rawRow := acc.ToSlice()
-
-		// Tạo vùng ghi cho dòng đó (Ví dụ: A15:BI15)
-		rng := fmt.Sprintf("%s!A%d:BI%d", sheetName, rowIndex, rowIndex)
-
-		data = append(data, &sheets.ValueRange{
-			Range:  rng,
-			Values: [][]interface{}{rawRow},
-		})
-	}
-
-	// Gọi API batchUpdate (1 request sửa được nhiều dòng)
-	rb := &sheets.BatchUpdateValuesRequest{
-		ValueInputOption: "RAW", // Ghi nguyên văn, không tự format
-		Data:             data,
-	}
-
-	_, err := s.srv.Spreadsheets.Values.BatchUpdate(spreadsheetID, rb).Do()
-	if err != nil {
-		return fmt.Errorf("batch update error: %v", err)
-	}
-
-	return nil
-}
-
-// AppendRows: Thêm dòng mới vào cuối Sheet
-func (s *Service) AppendRows(spreadsheetID, sheetName string, newAccounts []*models.TikTokAccount) error {
-	if len(newAccounts) == 0 {
-		return nil
-	}
-
-	var rawValues [][]interface{}
-	for _, acc := range newAccounts {
-		rawValues = append(rawValues, acc.ToSlice())
-	}
-
-	// Vùng ghi: Bắt đầu từ A1, Google sẽ tự tìm dòng trống cuối cùng
-	rng := fmt.Sprintf("%s!A1", sheetName)
-
-	rb := &sheets.ValueRange{
-		Values: rawValues,
-	}
-
-	// Gọi API Append
-	_, err := s.srv.Spreadsheets.Values.Append(spreadsheetID, rng, rb).
-		ValueInputOption("RAW").
-		InsertDataOption("INSERT_ROWS"). // Quan trọng: Chèn dòng mới
-		Do()
-
-	if err != nil {
-		return fmt.Errorf("append error: %v", err)
-	}
-
-	return nil
-}
-
-// AppendRawRows: Hỗ trợ ghi log dạng mảng thô (không qua Struct)
-func (s *Service) AppendRawRows(spreadsheetID, sheetName string, rawRows [][]interface{}) error {
-	if len(rawRows) == 0 { return nil }
-
-	rng := fmt.Sprintf("%s!A1", sheetName)
-	rb := &sheets.ValueRange{ Values: rawRows }
-
-	_, err := s.srv.Spreadsheets.Values.Append(spreadsheetID, rng, rb).
-		ValueInputOption("RAW").
-		InsertDataOption("INSERT_ROWS").
-		Do()
-
-	if err != nil { return fmt.Errorf("append raw error: %v", err) }
-	return nil
-}
-// FetchRawData: Đọc dữ liệu thô (Dùng cho EmailLogger)
+// FetchRawData: Lấy dữ liệu thô (Dùng cho EmailLogger - Mail)
 func (s *Service) FetchRawData(spreadsheetID, sheetName string, startRow, endRow int) ([][]interface{}, error) {
-	// Đọc từ cột A đến H (Cột 7) theo config Node.js
-	readRange := fmt.Sprintf("%s!A%d:H%d", sheetName, startRow, endRow)
+	readRange := fmt.Sprintf("%s!A%d:H%d", sheetName, startRow, endRow) // Lấy đến cột H
 
 	resp, err := s.srv.Spreadsheets.Values.Get(spreadsheetID, readRange).Do()
 	if err != nil {
@@ -168,13 +74,59 @@ func (s *Service) FetchRawData(spreadsheetID, sheetName string, startRow, endRow
 	return resp.Values, nil
 }
 
-// BatchUpdateCells: Cập nhật các ô cụ thể (Dùng để đánh dấu đã đọc Email)
+// BatchUpdateRows: Cập nhật nhiều dòng cùng lúc (Dùng cho DataTiktok)
+func (s *Service) BatchUpdateRows(spreadsheetID, sheetName string, updates map[int]*models.TikTokAccount) error {
+	if len(updates) == 0 {
+		return nil
+	}
+
+	var data []*sheets.ValueRange
+	for rowIndex, acc := range updates {
+		rng := fmt.Sprintf("%s!A%d", sheetName, rowIndex)
+		values := []interface{}{}
+		strSlice := acc.ToSlice()
+		for _, v := range strSlice {
+			values = append(values, v)
+		}
+
+		data = append(data, &sheets.ValueRange{
+			Range:  rng,
+			Values: [][]interface{}{values},
+		})
+	}
+
+	rb := &sheets.BatchUpdateValuesRequest{
+		ValueInputOption: "RAW",
+		Data:             data,
+	}
+
+	_, err := s.srv.Spreadsheets.Values.BatchUpdate(spreadsheetID, rb).Do()
+	return err
+}
+
+// AppendRawRows: Thêm dòng mới (Dùng cho Log/Append)
+func (s *Service) AppendRawRows(spreadsheetID, sheetName string, rows [][]interface{}) error {
+	rng := fmt.Sprintf("%s!A1", sheetName)
+	rb := &sheets.ValueRange{
+		Values: rows,
+	}
+
+	_, err := s.srv.Spreadsheets.Values.Append(spreadsheetID, rng, rb).
+		ValueInputOption("RAW").
+		InsertDataOption("INSERT_ROWS").
+		Do()
+	return err
+}
+
+// BatchUpdateCells: Cập nhật từng ô lẻ (Dùng cho Mail - đánh dấu đã đọc)
 func (s *Service) BatchUpdateCells(spreadsheetID, sheetName string, updates map[int]string) error {
-	if len(updates) == 0 { return nil }
+	if len(updates) == 0 {
+		return nil
+	}
 
 	var data []*sheets.ValueRange
 	for rowIndex, val := range updates {
-		// Update cột H (Cột 7) là cột READ
+		// Update cột H (Cột 7)
 		rng := fmt.Sprintf("%s!H%d", sheetName, rowIndex)
 		data = append(data, &sheets.ValueRange{
 			Range:  rng,
