@@ -15,206 +15,182 @@ import (
 	"tiktok-server/pkg/utils"
 )
 
-type UpdatedRequest struct {
-	Type     string                 `json:"type"`
-	Token    string                 `json:"token"`
-	DeviceId string                 `json:"deviceId"`
-	RowIndex int                    `json:"row_index"`
-	Sheet    string                 `json:"sheet"`
-	Note     string                 `json:"note"`
-	Extra    map[string]interface{} `json:"-"`
-}
-
-func (r *UpdatedRequest) UnmarshalJSON(data []byte) error {
-	type Alias UpdatedRequest
-	aux := &struct {
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	var m map[string]interface{}
-	if err := json.Unmarshal(data, &m); err != nil {
-		return err
-	}
-	r.Extra = m
-	return nil
-}
-
 func HandleUpdate(w http.ResponseWriter, r *http.Request, sheetSvc *sheets.Service, spreadsheetId string) {
-	var body UpdatedRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"status":"false","messenger":"JSON Error"}`, 400)
+	// Parse JSON manual to map to handle flexible fields
+	var bodyMap map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&bodyMap); err != nil {
+		utils.JSONResponse(w, "false", "JSON Error", nil)
 		return
 	}
 
-	sheetName := body.Sheet
-	if sheetName == "" {
-		sheetName = "DataTiktok"
+	sheetName := "DataTiktok"
+	if s, ok := bodyMap["sheet"].(string); ok && s != "" {
+		sheetName = s
 	}
 	isDataTiktok := (sheetName == "DataTiktok")
+	deviceId, _ := bodyMap["deviceId"].(string)
 
+	// Load Cache
 	var cacheItem *cache.SheetCacheItem
-	val, ok := cache.GlobalSheets.Load(spreadsheetId + "__" + sheetName)
-	if ok {
+	cacheKey := spreadsheetId + "__" + sheetName
+	if val, ok := cache.GlobalSheets.Load(cacheKey); ok {
 		cacheItem = val.(*cache.SheetCacheItem)
 	}
 
+	// Auto Load if missing
 	if cacheItem == nil || !cacheItem.IsValid() {
-		cacheItem = cache.NewSheetCache(spreadsheetId, sheetName)
-		accounts, err := sheetSvc.FetchData(spreadsheetId, sheetName, 11, 10000)
+		rawRows, err := sheetSvc.FetchData(spreadsheetId, sheetName, 11, 10000)
 		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"status":"false","messenger":"Lỗi tải dữ liệu: %v"}`, err), 500)
+			utils.JSONResponse(w, "false", "Load error", nil)
 			return
 		}
+		// Convert
+		parsedAccounts := make([]*models.TikTokAccount, len(rawRows))
+		for i, row := range rawRows {
+			acc := models.NewAccount()
+			acc.FromSlice(row)
+			acc.RowIndex = 11 + i
+			parsedAccounts[i] = acc
+		}
+		cacheItem = cache.NewSheetCache(spreadsheetId, sheetName)
 		cacheItem.Lock()
-		cacheItem.RawValues = accounts
+		cacheItem.RawValues = parsedAccounts
 		cacheItem.Unlock()
-		cache.GlobalSheets.Store(spreadsheetId+"__"+sheetName, cacheItem)
+		cache.GlobalSheets.Store(cacheKey, cacheItem)
 	}
 
+	cacheItem.Lock()
+	defer cacheItem.Unlock()
+
+	// Logic tìm vị trí (Target Index)
 	targetIndex := -1
 	isAppend := false
 
-	cacheItem.RLock()
-	rows := cacheItem.RawValues
-
-	if body.RowIndex >= 11 {
-		idx := body.RowIndex - 11
-		if idx >= 0 && idx < len(rows) {
+	// 1. Tìm theo Row Index
+	if ridx, ok := bodyMap["row_index"].(float64); ok { // JSON number is float64
+		idx := int(ridx) - 11
+		if idx >= 0 && idx < len(cacheItem.RawValues) {
 			targetIndex = idx
-		} else {
-			cacheItem.RUnlock()
-			utils.JSONResponse(w, "false", "Dòng yêu cầu không tồn tại", nil)
-			return
 		}
-	} else {
+	}
+
+	// 2. Tìm theo Search Columns
+	if targetIndex == -1 {
 		searchCols := make(map[int]string)
-		for k, v := range body.Extra {
+		for k, v := range bodyMap {
 			if strings.HasPrefix(k, "search_col_") {
 				idx, _ := strconv.Atoi(strings.TrimPrefix(k, "search_col_"))
 				searchCols[idx] = utils.NormalizeString(fmt.Sprintf("%v", v))
 			}
 		}
-
+		
 		if len(searchCols) > 0 {
-			for i, acc := range rows {
+			for i, acc := range cacheItem.RawValues {
 				match := true
-				rawArr := acc.ToSlice()
-				for colIdx, val := range searchCols {
-					cellVal := ""
-					if colIdx < len(rawArr) {
-						cellVal = utils.NormalizeString(fmt.Sprintf("%v", rawArr[colIdx]))
+				rowSlice := acc.ToSlice()
+				for colIdx, searchVal := range searchCols {
+					val := ""
+					if colIdx < len(rowSlice) {
+						val = utils.NormalizeString(fmt.Sprintf("%v", rowSlice[colIdx]))
 					}
-					if cellVal != val {
-						match = false
-						break
+					if val != searchVal {
+						match = false; break
 					}
 				}
 				if match {
-					targetIndex = i
-					break
+					targetIndex = i; break
 				}
 			}
 			if targetIndex == -1 {
-				cacheItem.RUnlock()
-				utils.JSONResponse(w, "false", "Không tìm thấy nick phù hợp", nil)
+				utils.JSONResponse(w, "false", "Không tìm thấy nick", nil)
 				return
 			}
 		} else {
 			isAppend = true
 		}
 	}
-	cacheItem.RUnlock()
 
-	var newAcc *models.TikTokAccount
-	var oldNote string
-
+	// Prepare Data
+	var currentAcc *models.TikTokAccount
 	if isAppend {
-		newAcc = models.NewAccount()
+		currentAcc = models.NewAccount()
 	} else {
-		oldAcc := cacheItem.GetAccountByIndex(targetIndex)
-		temp := *oldAcc
-		newAcc = &temp
-		newAcc.ExtraData = make([]string, len(oldAcc.ExtraData))
-		copy(newAcc.ExtraData, oldAcc.ExtraData)
-		oldNote = oldAcc.Note
+		// Clone để tránh lỗi tham chiếu
+		old := cacheItem.RawValues[targetIndex]
+		cp := *old
+		cp.ExtraData = make([]string, len(old.ExtraData))
+		copy(cp.ExtraData, old.ExtraData)
+		currentAcc = &cp
 	}
+	
+	rowSlice := currentAcc.ToSlice()
+	// Mở rộng slice nếu cần (V243 Nodejs fill 61)
+	for len(rowSlice) < 61 { rowSlice = append(rowSlice, "") }
 
-	currentSlice := newAcc.ToSlice()
-	for len(currentSlice) < 61 {
-		currentSlice = append(currentSlice, "")
-	}
-
-	for k, v := range body.Extra {
+	// Update Values from "col_X"
+	for k, v := range bodyMap {
 		if strings.HasPrefix(k, "col_") {
 			idx, _ := strconv.Atoi(strings.TrimPrefix(k, "col_"))
 			if idx >= 0 && idx < 61 {
-				currentSlice[idx] = fmt.Sprintf("%v", v)
+				rowSlice[idx] = fmt.Sprintf("%v", v)
 			}
 		}
 	}
 
+	// Logic Note & DeviceID for DataTiktok
 	if isDataTiktok {
-		content := body.Note
-		if content == "" {
-			if v, ok := body.Extra["col_1"]; ok {
-				content = fmt.Sprintf("%v", v)
-			}
+		if deviceId != "" {
+			rowSlice[2] = deviceId // Col 2 DeviceID
 		}
-
-		noteMode := "updated"
-		if isAppend {
-			noteMode = "new"
+		// Note logic
+		newContent := ""
+		if note, ok := bodyMap["note"].(string); ok {
+			newContent = note
+		} else {
+			// fallback lấy từ col_1
+			newContent = fmt.Sprintf("%v", rowSlice[1])
 		}
-
-		newNote := utils.CreateStandardNote(oldNote, content, noteMode)
-		currentSlice[1] = newNote
-
-		if body.DeviceId != "" {
-			currentSlice[2] = body.DeviceId
+		
+		oldNote := ""
+		if !isAppend && targetIndex != -1 {
+			oldNote = cacheItem.RawValues[targetIndex].Note
 		}
+		
+		mode := "updated"
+		if isAppend { mode = "new" }
+		
+		rowSlice[1] = utils.CreateStandardNote(oldNote, newContent, mode)
 	}
 
-	newAcc.FromSlice(currentSlice)
-
+	// Map back to struct
+	currentAcc.FromSlice(rowSlice)
+	
+	// Execute Update/Append
 	q := queue.GetQueue(spreadsheetId, sheetSvc)
-
+	
 	if isAppend {
-		cacheItem.Lock()
-		newAcc.RowIndex = 11 + len(cacheItem.RawValues)
-		cacheItem.RawValues = append(cacheItem.RawValues, newAcc)
+		currentAcc.RowIndex = 11 + len(cacheItem.RawValues)
+		cacheItem.RawValues = append(cacheItem.RawValues, currentAcc)
 		cacheItem.LastAccessed = time.Now()
-		cacheItem.Unlock()
-
-		q.EnqueueAppend(sheetName, newAcc.ToSlice())
-
-		auth, activity, ai := SplitProfile(newAcc)
-		resp := map[string]interface{}{
-			"status":           "true",
-			"type":             "updated",
-			"messenger":        "Thêm mới thành công",
-			"auth_profile":     auth,
-			"activity_profile": activity,
-			"ai_profile":       ai,
-		}
-		utils.JSONResponseRaw(w, resp)
+		
+		q.EnqueueAppend(sheetName, rowSlice)
+		
+		p1, p2, p3 := SplitProfile(currentAcc)
+		utils.JSONResponseRaw(w, map[string]interface{}{
+			"status": "true", "type": "updated", "messenger": "Thêm mới thành công",
+			"auth_profile": p1, "activity_profile": p2, "ai_profile": p3,
+		})
 	} else {
-		cacheItem.UpdateAccount(targetIndex, newAcc)
-		q.EnqueueUpdate(sheetName, targetIndex, newAcc)
-
-		auth, activity, ai := SplitProfile(newAcc)
-		resp := map[string]interface{}{
-			"status":           "true",
-			"type":             "updated",
-			"messenger":        "Cập nhật thành công",
-			"row_index":        11 + targetIndex,
-			"auth_profile":     auth,
-			"activity_profile": activity,
-			"ai_profile":       ai,
-		}
-		utils.JSONResponseRaw(w, resp)
+		cacheItem.RawValues[targetIndex] = currentAcc // Update pointer in Cache
+		cacheItem.LastAccessed = time.Now()
+		
+		q.EnqueueUpdate(sheetName, currentAcc.RowIndex, rowSlice)
+		
+		p1, p2, p3 := SplitProfile(currentAcc)
+		utils.JSONResponseRaw(w, map[string]interface{}{
+			"status": "true", "type": "updated", "messenger": "Cập nhật thành công",
+			"row_index": currentAcc.RowIndex,
+			"auth_profile": p1, "activity_profile": p2, "ai_profile": p3,
+		})
 	}
 }
