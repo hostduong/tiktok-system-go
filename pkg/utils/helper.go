@@ -1,7 +1,9 @@
 package utils
 
 import (
+	"encoding/json" // <--- Đã thêm
 	"fmt"
+	"net/http"      // <--- Đã thêm
 	"regexp"
 	"strconv"
 	"strings"
@@ -12,44 +14,36 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// NormalizeString: Chuẩn hóa chuỗi (Lowercase, Trim, NFC)
-// Tương đương: val.trim().toLowerCase().normalize('NFC')
+// NormalizeString: Chuẩn hóa chuỗi
 func NormalizeString(val string) string {
 	if val == "" {
 		return ""
 	}
-	// Trim space
 	s := strings.TrimSpace(val)
-	// Lowercase
 	s = strings.ToLower(s)
-	// Normalize NFC
 	t := transform.Chain(norm.NFD, transform.RemoveFunc(isMn), norm.NFC)
 	result, _, _ := transform.String(t, s)
 	return result
 }
 
 func isMn(r rune) bool {
-	return unicode.Is(unicode.Mn, r) // Mn: nonspacing marks
+	return unicode.Is(unicode.Mn, r)
 }
 
-// GetVietnamTime: Lấy giờ VN (UTC+7)
-// Tương đương: lay_gio_viet_nam
+// GetVietnamTime: Lấy giờ VN
 func GetVietnamTime() string {
 	loc, _ := time.LoadLocation("Asia/Ho_Chi_Minh")
 	now := time.Now().In(loc)
 	return now.Format("02/01/2006 15:04:05")
 }
 
-// Regex cho hàm Note
 var (
 	regexCount = regexp.MustCompile(`\(Lần\s*(\d+)\)`)
 	regexDate  = regexp.MustCompile(`(\d{1,2}\/\d{1,2}\/\d{4})`)
 )
 
 // CreateStandardNote: Tạo ghi chú chuẩn
-// Tương đương: tao_ghi_chu_chuan
 func CreateStandardNote(oldNote, newStatus, mode string) string {
-	// Chuẩn hóa input
 	str := NormalizeString(oldNote)
 	nowFull := GetVietnamTime()
 
@@ -60,7 +54,6 @@ func CreateStandardNote(oldNote, newStatus, mode string) string {
 		return fmt.Sprintf("%s\n%s", newStatus, nowFull)
 	}
 
-	// Lấy số lần chạy cũ
 	count := 0
 	matches := regexCount.FindStringSubmatch(str)
 	if len(matches) > 1 {
@@ -73,7 +66,6 @@ func CreateStandardNote(oldNote, newStatus, mode string) string {
 		}
 		statusToUse := newStatus
 		if statusToUse == "" {
-			// Lấy dòng đầu tiên của note cũ làm status
 			parts := strings.Split(str, "\n")
 			if len(parts) > 0 {
 				statusToUse = parts[0]
@@ -84,7 +76,6 @@ func CreateStandardNote(oldNote, newStatus, mode string) string {
 		return fmt.Sprintf("%s\n%s (Lần %d)", statusToUse, nowFull, count)
 	}
 
-	// Mode reset/login
 	todayStr := strings.Split(nowFull, " ")[0]
 	dateMatch := regexDate.FindStringSubmatch(str)
 	oldDate := ""
