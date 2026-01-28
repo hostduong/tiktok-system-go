@@ -53,6 +53,7 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 	}
 	isDataTiktok := (sheetName == SHEET_NAMES.DATA_TIKTOK)
 
+	// Smart Load (Dữ liệu đã phân vùng)
 	cacheData, err := LayDuLieu(sid, sheetName, false)
 	if err != nil {
 		return nil, fmt.Errorf("Lỗi tải dữ liệu")
@@ -62,22 +63,24 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 	targetIndex := -1
 	isAppend := false
 	
-	// 🔥 FIX QUAN TRỌNG: Hỗ trợ đọc row_index từ cả SỐ và CHUỖI
+	// 1. Parse row_index THÔNG MINH (Chấp nhận cả String và Int/Float)
 	rowIndexInput := -1
 	if v, ok := body["row_index"]; ok {
 		switch val := v.(type) {
-		case float64: // Nếu JSON là số: 13
+		case float64:
 			rowIndexInput = int(val)
-		case string: // Nếu JSON là chuỗi: "13"
+		case string:
 			if val != "" {
 				if i, err := strconv.Atoi(strings.TrimSpace(val)); err == nil {
 					rowIndexInput = i
 				}
 			}
+		case int:
+			rowIndexInput = val
 		}
 	}
 
-	// Logic parsing cột tìm kiếm
+	// 2. Logic tìm dòng cần sửa
 	searchCols := make(map[int]string)
 	updateCols := make(map[int]interface{})
 
@@ -94,19 +97,17 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 	hasRowIndex := (rowIndexInput >= RANGES.DATA_START_ROW)
 	hasSearchCols := (len(searchCols) > 0)
 
-	// --- LOGIC XÁC ĐỊNH DÒNG (Giống Node.js) ---
+	// Trường hợp 1: Có row_index -> Truy cập trực tiếp (O(1))
 	if hasRowIndex {
-		// Trường hợp 1: Có row_index -> Phải tìm thấy hoặc báo lỗi
 		idx := rowIndexInput - RANGES.DATA_START_ROW
 		if idx >= 0 && idx < len(rows) {
 			if hasSearchCols {
+				// Double check nếu client kỹ tính
 				match := true
 				for colIdx, val := range searchCols {
 					cellVal := ""
-					if colIdx < CACHE.CLEAN_COL_LIMIT {
+					if colIdx < len(cacheData.CleanValues[idx]) {
 						cellVal = cacheData.CleanValues[idx][colIdx]
-					} else {
-						cellVal = CleanString(rows[idx][colIdx])
 					}
 					if cellVal != val {
 						match = false
@@ -119,19 +120,17 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 			}
 			targetIndex = idx
 		} else {
-			// Logic Node.js: Có index mà không tìm thấy -> Báo lỗi
 			return nil, fmt.Errorf("Dòng yêu cầu không tồn tại")
 		}
 	} else if hasSearchCols {
-		// Trường hợp 2: Không có row_index, tìm theo cột -> Phải tìm thấy hoặc báo lỗi
-		for i, row := range rows {
+		// Trường hợp 2: Search động (Phải quét mảng O(N))
+		// (Update by search ít dùng nên O(N) là chấp nhận được)
+		for i, row := range cacheData.CleanValues {
 			match := true
 			for colIdx, val := range searchCols {
 				cellVal := ""
-				if colIdx < CACHE.CLEAN_COL_LIMIT {
-					cellVal = cacheData.CleanValues[i][colIdx]
-				} else {
-					cellVal = CleanString(row[colIdx])
+				if colIdx < len(row) {
+					cellVal = row[colIdx]
 				}
 				if cellVal != val {
 					match = false
@@ -144,17 +143,17 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 			}
 		}
 		if targetIndex == -1 {
-			// Logic Node.js: Tìm không thấy -> Báo lỗi
-			return nil, fmt.Errorf("Không tìm thấy nick phù hợp")
+			return nil, fmt.Errorf("Không tìm thấy dữ liệu phù hợp")
 		}
 	} else {
-		// Trường hợp 3: Không có gì cả -> Mới được phép Append
+		// Trường hợp 3: Append (Thêm mới)
 		isAppend = true
 	}
 
-	// --- PHẦN GHI DỮ LIỆU ---
+	// 3. Chuẩn bị dữ liệu ghi
 	var newRow []interface{}
 	oldNote := ""
+	oldStatus := "" // Để track thay đổi status map
 
 	if isAppend {
 		newRow = make([]interface{}, 61)
@@ -162,6 +161,9 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 	} else {
 		if isDataTiktok {
 			oldNote = fmt.Sprintf("%v", rows[targetIndex][INDEX_DATA_TIKTOK.NOTE])
+			if INDEX_DATA_TIKTOK.STATUS < len(cacheData.CleanValues[targetIndex]) {
+				oldStatus = cacheData.CleanValues[targetIndex][INDEX_DATA_TIKTOK.STATUS]
+			}
 		}
 		srcRow := rows[targetIndex]
 		newRow = make([]interface{}, 61)
@@ -197,14 +199,17 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 		newRow[INDEX_DATA_TIKTOK.NOTE] = makeNoteContent(oldNote, content, newStatus, mode)
 	}
 
+	// 4. Update RAM & Queue
 	cacheKey := sid + KEY_SEPARATOR + sheetName
 	
 	if isAppend {
+		// Append phức tạp hơn, tạm thời invalidate cache để load lại lần sau cho an toàn
+		// Hoặc thêm vào cuối mảng RAM (nhưng cần handle StatusMap/AssignedMap)
 		STATE.SheetMutex.Lock()
-		delete(STATE.SheetCache, cacheKey)
+		delete(STATE.SheetCache, cacheKey) // Xóa cache để ép load lại
 		STATE.SheetMutex.Unlock()
 		
-		GoogleServiceAppend(sid, sheetName, [][]interface{}{newRow})
+		QueueAppend(sid, sheetName, [][]interface{}{newRow})
 		
 		return &UpdateResponse{
 			Status:          "true",
@@ -216,19 +221,48 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 		}, nil
 
 	} else {
+		// 🔥 UPDATE RAM & PARTITION MAPS (Logic quan trọng)
 		STATE.SheetMutex.Lock()
-		if cache, ok := STATE.SheetCache[cacheKey]; ok {
-			cache.RawValues[targetIndex] = newRow
-			cleanR := make([]string, CACHE.CLEAN_COL_LIMIT)
-			for i := 0; i < CACHE.CLEAN_COL_LIMIT; i++ {
-				cleanR[i] = CleanString(newRow[i])
+		
+		// A. Update Values
+		cacheData.RawValues[targetIndex] = newRow
+		
+		// B. Update CleanValues
+		for i := 0; i < CACHE.CLEAN_COL_LIMIT; i++ {
+			if i < len(newRow) {
+				cacheData.CleanValues[targetIndex][i] = CleanString(newRow[i])
 			}
-			cache.CleanValues[targetIndex] = cleanR
-			cache.LastAccessed = time.Now().UnixMilli()
+		}
+		cacheData.LastAccessed = time.Now().UnixMilli()
+
+		// C. 🔥 Update StatusMap (Di chuyển index nếu đổi trạng thái)
+		if isDataTiktok {
+			newCleanStatus := CleanString(newRow[INDEX_DATA_TIKTOK.STATUS])
+			
+			if newCleanStatus != oldStatus {
+				// Xóa khỏi nhóm cũ
+				if list, ok := cacheData.StatusMap[oldStatus]; ok {
+					for k, v := range list {
+						if v == targetIndex {
+							// Xóa phần tử k (swap last or slice)
+							cacheData.StatusMap[oldStatus] = append(list[:k], list[k+1:]...)
+							break
+						}
+					}
+				}
+				// Thêm vào nhóm mới
+				cacheData.StatusMap[newCleanStatus] = append(cacheData.StatusMap[newCleanStatus], targetIndex)
+			}
+
+			// D. Update AssignedMap (Nếu gán device mới - ít gặp ở luồng update nhưng vẫn nên làm)
+			if deviceId != "" {
+				cacheData.AssignedMap[deviceId] = targetIndex
+			}
 		}
 		STATE.SheetMutex.Unlock()
 
-		GoogleServiceUpdate(sid, sheetName, targetIndex, newRow)
+		// Gửi xuống hàng đợi ghi đĩa
+		QueueUpdate(sid, sheetName, targetIndex, newRow)
 		
 		return &UpdateResponse{
 			Status:          "true",
@@ -242,14 +276,7 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 	}
 }
 
-// Helper Wrappers
-func GoogleServiceUpdate(sid string, sheet string, rowIdx int, data []interface{}) {
-	QueueUpdate(sid, sheet, rowIdx, data)
-}
-func GoogleServiceAppend(sid string, sheet string, data [][]interface{}) {
-	QueueAppend(sid, sheet, data)
-}
-
+// Logic tạo Note (Giữ nguyên)
 func makeNoteContent(oldNote, content, newStatus, mode string) string {
 	nowFull := time.Now().Add(7 * time.Hour).Format("02/01/2006 15:04:05")
 	if mode == "new" {
