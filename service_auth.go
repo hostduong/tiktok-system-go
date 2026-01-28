@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	firebase "firebase.google.com/go/v4"
@@ -18,22 +17,7 @@ import (
 
 var firebaseDB *db.Client
 
-// Struct lưu thông tin Token sau khi decode
-type TokenData struct {
-	Token         string
-	SpreadsheetID string
-	Data          map[string]interface{}
-}
-
-// Struct trả về kết quả check token
-type AuthResult struct {
-	IsValid       bool
-	Messenger     string
-	SpreadsheetID string
-	Data          map[string]interface{}
-}
-
-// 🔥 Đổi tên hàm thành InitAuthService cho khớp với main.go
+// InitAuthService: Khởi tạo Firebase
 func InitAuthService(credJSON []byte) {
 	ctx := context.Background()
 	opt := option.WithCredentialsJSON(credJSON)
@@ -56,39 +40,33 @@ func InitAuthService(credJSON []byte) {
 	fmt.Println("✅ Firebase Service initialized (V4).")
 }
 
-// 🔥 AuthMiddleware: Kiểm tra token trước khi vào Handler
+// AuthMiddleware: Middleware kiểm tra token
 func AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 1. Đọc Body để lấy Token (Copy body ra để không mất stream)
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, `{"status":"false","messenger":"Read Body Error"}`, 400)
 			return
 		}
 		
-		// Khôi phục Body để Handler phía sau đọc lại được
 		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
 		var bodyMap map[string]interface{}
 		if err := json.Unmarshal(bodyBytes, &bodyMap); err != nil {
-			// Nếu JSON lỗi, vẫn cho qua để Handler sau xử lý hoặc chặn tùy logic, 
-			// nhưng ở đây ta chặn luôn cho an toàn.
 			http.Error(w, `{"status":"false","messenger":"JSON Error"}`, 400)
 			return
 		}
 
 		tokenStr := CleanString(bodyMap["token"])
 		
-		// 2. Check Token với Firebase
-		authRes := checkTokenFirebase(tokenStr)
+		// 🔥 Gọi hàm CheckToken (Viết hoa)
+		authRes := CheckToken(tokenStr)
 		if !authRes.IsValid {
 			w.Header().Set("Content-Type", "application/json")
-			// Trả về 200 OK nhưng nội dung báo lỗi (theo phong cách Node.js cũ)
 			json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": authRes.Messenger})
 			return
 		}
 
-		// 3. Lưu thông tin vào Context
 		ctx := context.WithValue(r.Context(), "tokenData", &TokenData{
 			Token:         tokenStr,
 			SpreadsheetID: authRes.SpreadsheetID,
@@ -99,13 +77,13 @@ func AuthMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// Logic check token chi tiết
-func checkTokenFirebase(token string) AuthResult {
+// 🔥 ĐỔI TÊN HÀM: checkTokenFirebase -> CheckToken (Exported)
+// Để các file handler_log.go, handler_search.go có thể gọi được
+func CheckToken(token string) AuthResult {
 	if token == "" || len(token) < 50 {
 		return AuthResult{IsValid: false, Messenger: "Token không hợp lệ"}
 	}
 
-	// Check Firebase DB
 	ref := firebaseDB.NewRef("TOKEN_TIKTOK/" + token)
 	var data map[string]interface{}
 	if err := ref.Get(context.Background(), &data); err != nil || data == nil {
@@ -116,7 +94,6 @@ func checkTokenFirebase(token string) AuthResult {
 		return AuthResult{IsValid: false, Messenger: "Token lỗi data"}
 	}
 
-	// Check ngày hết hạn
 	expStr := fmt.Sprintf("%v", data["expired"])
 	expTime := parseExpirationTime(expStr)
 	if time.Now().After(expTime) {
