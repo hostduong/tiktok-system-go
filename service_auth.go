@@ -7,45 +7,32 @@ import (
 	"strings"
 	"time"
 
-	// 🔥 QUAN TRỌNG: Phải có đuôi /v4 ở cuối thì mới chạy được ở Châu Á
 	firebase "firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/db"
-	
 	"google.golang.org/api/option"
 )
 
-// Biến global cho Firebase App
 var firebaseApp *firebase.App
 var firebaseDb *db.Client
 
-// InitFirebase khởi tạo kết nối
 func InitFirebase(credJSON []byte) {
 	ctx := context.Background()
 	opt := option.WithCredentialsJSON(credJSON)
 	
-	// Cấu hình Database URL (Hỗ trợ firebasedatabase.app)
 	conf := &firebase.Config{
 		DatabaseURL: "https://hostduong-1991-default-rtdb.asia-southeast1.firebasedatabase.app",
 	}
 
 	app, err := firebase.NewApp(ctx, conf, opt)
-	if err != nil {
-		log.Fatalf("❌ Firebase Init Error: %v", err)
-	}
+	if err != nil { log.Fatalf("❌ Firebase Init Error: %v", err) }
 	
 	client, err := app.Database(ctx)
-	if err != nil {
-		log.Fatalf("❌ Firebase DB Error: %v", err)
-	}
+	if err != nil { log.Fatalf("❌ Firebase DB Error: %v", err) }
 	
 	firebaseApp = app
 	firebaseDb = client
 	fmt.Println("✅ Firebase initialized successfully (v4).")
 }
-
-// =================================================================================================
-// 🟢 AUTH CORE
-// =================================================================================================
 
 type AuthResult struct {
 	IsValid       bool
@@ -55,28 +42,23 @@ type AuthResult struct {
 }
 
 func CheckToken(token string) AuthResult {
-	// Validate sơ bộ
 	if token == "" || len(token) < 50 || len(token) > 200 || !REGEX_TOKEN.MatchString(token) {
 		return AuthResult{IsValid: false, Messenger: "Token sai định dạng"}
 	}
 
-	// Rate Limit
 	if !checkRateLimit(token, false) {
 		return AuthResult{IsValid: false, Messenger: "Token bị giới hạn tạm thời (Spam)"}
 	}
 
 	now := time.Now().UnixMilli()
 
-	// Check RAM
 	STATE.TokenMutex.RLock()
 	cached, found := STATE.TokenCache[token]
 	STATE.TokenMutex.RUnlock()
 
 	if found {
 		if now < cached.ExpiryTime {
-			if cached.IsInvalid {
-				return AuthResult{IsValid: false, Messenger: cached.Msg}
-			}
+			if cached.IsInvalid { return AuthResult{IsValid: false, Messenger: cached.Msg} }
 			return AuthResult{IsValid: true, SpreadsheetID: cached.Data.SpreadsheetID, Role: cached.Data.Role}
 		}
 		STATE.TokenMutex.Lock()
@@ -84,7 +66,6 @@ func CheckToken(token string) AuthResult {
 		STATE.TokenMutex.Unlock()
 	}
 
-	// Check Firebase
 	ref := firebaseDb.NewRef("TOKEN_TIKTOK/" + token)
 	var data map[string]interface{}
 	
@@ -102,16 +83,14 @@ func CheckToken(token string) AuthResult {
 		return AuthResult{IsValid: false, Messenger: "Token không tồn tại"}
 	}
 
-	isExpired, _ := data["expired"].(bool)
-	if !isExpired {
-		checkRateLimit(token, true)
-		updateTokenCache(token, TokenData{}, true, "Token lỗi", 60000)
-		return AuthResult{IsValid: false, Messenger: "Token lỗi"}
-	}
+	// 🔥 FIX QUAN TRỌNG: Bỏ qua check boolean 'expired', chỉ check thời gian
+	// Trong Node.js cũ có thể logic là check flag, nhưng DB hiện tại 'expired' là string ngày tháng.
+	// Chúng ta sẽ parse thẳng string đó để kiểm tra hạn dùng.
 
-	expVal := data["expiration_time"]
+	expVal := data["expired"] // Lấy trường 'expired' (là chuỗi ngày tháng)
 	expTimeMs := parseExpirationTime(expVal)
 
+	// Nếu không parse được hoặc thời gian đã qua -> Hết hạn
 	if expTimeMs == 0 || now > expTimeMs {
 		updateTokenCache(token, TokenData{}, true, "Token hết hạn", 60000)
 		return AuthResult{IsValid: false, Messenger: "Token hết hạn"}
@@ -120,15 +99,11 @@ func CheckToken(token string) AuthResult {
 	sid, _ := data["spreadsheetId"].(string)
 	role, _ := data["role"].(string)
 
-	tokenData := TokenData{
-		SpreadsheetID: sid,
-		Role:          role,
-	}
+	tokenData := TokenData{ SpreadsheetID: sid, Role: role }
 
+	// Tính TTL Cache
 	ttl := expTimeMs - now
-	if ttl > CACHE.TOKEN_TTL_MS {
-		ttl = CACHE.TOKEN_TTL_MS
-	}
+	if ttl > CACHE.TOKEN_TTL_MS { ttl = CACHE.TOKEN_TTL_MS }
 	
 	updateTokenCache(token, tokenData, false, "", ttl)
 
@@ -138,37 +113,48 @@ func CheckToken(token string) AuthResult {
 func updateTokenCache(token string, data TokenData, isInvalid bool, msg string, ttlMs int64) {
 	STATE.TokenMutex.Lock()
 	defer STATE.TokenMutex.Unlock()
-	
-	STATE.TokenCache[token] = &CachedToken{
-		Data:       data,
-		IsInvalid:  isInvalid,
-		Msg:        msg,
-		ExpiryTime: time.Now().UnixMilli() + ttlMs,
-	}
+	STATE.TokenCache[token] = &CachedToken{Data: data, IsInvalid: isInvalid, Msg: msg, ExpiryTime: time.Now().UnixMilli() + ttlMs}
 }
 
 func parseExpirationTime(val interface{}) int64 {
 	if val == nil { return 0 }
+	
+	// Case 1: Là số (Unix timestamp hoặc Excel Serial)
 	if num, ok := val.(float64); ok {
 		if num < 200000 { return int64((num - 25569) * 86400000) - (7 * 3600000) }
 		return int64(num)
 	}
+
+	// Case 2: Là chuỗi (dd/mm/yyyy HH:mm:ss)
 	str, ok := val.(string)
 	if !ok { return 0 }
 	str = strings.TrimSpace(str)
 	if str == "" { return 0 }
+
+	// Chuẩn hóa format
 	normalized := strings.ReplaceAll(str, "-", "/")
 	normalized = strings.ReplaceAll(normalized, ".", "/")
+	
 	loc, _ := time.LoadLocation("Asia/Ho_Chi_Minh")
 	if loc == nil { loc = time.FixedZone("UTC+7", 7*60*60) }
-	if len(normalized) <= 10 {
-		t, err := time.ParseInLocation("02/01/2006", normalized, loc)
-		if err == nil { return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 0, loc).UnixMilli() }
+
+	// Thử parse các định dạng phổ biến
+	formats := []string{
+		"02/01/2006 15:04:05", // dd/mm/yyyy HH:mm:ss (Format trong DB của bạn)
+		"02/01/2006",          // dd/mm/yyyy
+		time.RFC3339,          // ISO 8601
 	}
-	t, err := time.ParseInLocation("02/01/2006 15:04:05", normalized, loc)
-	if err == nil { return t.UnixMilli() }
-	tISO, err := time.Parse(time.RFC3339, str)
-	if err == nil { return tISO.UnixMilli() }
+
+	for _, f := range formats {
+		if t, err := time.ParseInLocation(f, normalized, loc); err == nil {
+			// Nếu chỉ có ngày, set về cuối ngày
+			if len(normalized) <= 10 {
+				return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 0, loc).UnixMilli()
+			}
+			return t.UnixMilli()
+		}
+	}
+
 	return 0
 }
 
