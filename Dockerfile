@@ -1,7 +1,6 @@
 # ==========================================
 # STAGE 1: Build (Biên dịch code)
 # ==========================================
-# Dùng bản alpine mới nhất (thường là Go 1.23+) để tối ưu tương thích
 FROM golang:alpine AS builder
 
 # Cài đặt git
@@ -9,18 +8,14 @@ RUN apk add --no-cache git
 
 WORKDIR /app
 
-# Copy TOÀN BỘ mã nguồn vào trước
+# Copy toàn bộ mã nguồn
 COPY . .
 
-# 🔥 FIX LỖI VERSION:
-# Ép xuống phiên bản Firestore ổn định tương thích với Go hiện tại
-# (Tránh bản v1.21.0 yêu cầu Go 1.24 gây lỗi)
-RUN go get cloud.google.com/go/firestore@v1.19.0
+# 🔥 UPDATE: Tải thư viện Firebase v4 (Bản mới nhất hỗ trợ Asia)
+RUN go get firebase.google.com/go/v4
 
-# Sau đó mới chạy tidy để dọn dẹp và tải các thư viện khác
+# Dọn dẹp và tải các thư viện khác
 RUN go mod tidy
-
-# Tải dependencies
 RUN go mod download
 
 # Build file thực thi
@@ -33,13 +28,13 @@ FROM alpine:latest
 
 WORKDIR /root/
 
-# Cài đặt chứng chỉ bảo mật và múi giờ
+# Cài đặt chứng chỉ
 RUN apk --no-cache add ca-certificates tzdata
 
-# Copy file thực thi từ builder
+# Copy file thực thi
 COPY --from=builder /app/server .
 
-# Thiết lập múi giờ Việt Nam
+# Thiết lập múi giờ
 ENV TZ=Asia/Ho_Chi_Minh
 
 # Mở port
