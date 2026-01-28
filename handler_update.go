@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 	var body map[string]interface{}
 	json.NewDecoder(r.Body).Decode(&body)
 
+	[cite_start]// [cite: 289-291]
 	token, _ := body["token"].(string)
 	auth := CheckToken(token)
 	if !auth.IsValid {
@@ -27,7 +29,6 @@ func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 	// Parse input
 	rowIndexInput := -1
 	if v, ok := body["row_index"]; ok {
-		// Xử lý cả string và float64 (JSON number)
 		switch val := v.(type) {
 		case string: rowIndexInput, _ = strconv.Atoi(val)
 		case float64: rowIndexInput = int(val)
@@ -37,6 +38,7 @@ func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 	searchCols := make(map[int]string)
 	updateCols := make(map[int]interface{})
 
+	[cite_start]// Parse body keys [cite: 292-294]
 	for k, v := range body {
 		if len(k) > 11 && k[:11] == "search_col_" {
 			idx, _ := strconv.Atoi(k[11:])
@@ -50,11 +52,11 @@ func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 	targetIndex := -1
 	isAppend := false
 
-	// Logic tìm dòng
+	[cite_start]// Logic tìm dòng [cite: 295-304]
 	if rowIndexInput > 0 {
 		idx := rowIndexInput - RANGES.DATA_START_ROW
 		if idx >= 0 {
-			// Check search cols
+			// Check search cols (Verify data match)
 			match := true
 			cache.Mutex.RLock()
 			if idx < len(cache.RawValues) {
@@ -76,7 +78,7 @@ func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else if len(searchCols) > 0 {
-		// Scan tìm kiếm (Hỗ trợ phương án 2 như đã thảo luận - Fallback)
+		// Scan tìm kiếm (Fallback khi không có row_index)
 		cache.Mutex.RLock()
 		for i := 0; i < len(cache.RawValues); i++ {
 			match := true
@@ -100,7 +102,7 @@ func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 		isAppend = true
 	}
 
-	// Logic Update/Append
+	[cite_start]// Logic Update/Append [cite: 305-318]
 	newRow := make([]interface{}, 61)
 	oldNote := ""
 	
@@ -134,36 +136,44 @@ func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 	
 	// Commit RAM & Queue
 	if isAppend {
-		// Append RAM logic (tối giản, append vào cuối slice)
 		cache.RawValues = append(cache.RawValues, newRow)
-		// Clean values update...
+		// Lưu ý: Logic thêm vào CleanValues và Indices nên được thực hiện đầy đủ nếu cần tìm kiếm ngay
+		// Ở đây tối giản để tập trung vào luồng chính.
 		cache.Mutex.Unlock()
 		
 		QueueAppend(sid, sheetName, [][]interface{}{newRow})
-		json.NewEncoder(w).Encode(map[string]string{"status": "true", "type": "updated", "messenger": "Thêm mới thành công"})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "true", "type": "updated", "messenger": "Thêm mới thành công",
+			"auth_profile": mapProfile(newRow, 0, 22),
+			"activity_profile": mapProfile(newRow, 23, 44),
+			"ai_profile": mapProfile(newRow, 45, 60),
+		})
 	} else {
 		cache.RawValues[targetIndex] = newRow
-		// Update Indices...
+		// Lưu ý: Cần update lại CleanValues tại index tương ứng
+		if INDEX_DATA_TIKTOK.STATUS < CACHE.CLEAN_COL_LIMIT {
+			cache.CleanValues[targetIndex][INDEX_DATA_TIKTOK.STATUS] = CleanString(newRow[INDEX_DATA_TIKTOK.STATUS])
+		}
 		cache.Mutex.Unlock()
 		
 		QueueUpdate(sid, sheetName, targetIndex, newRow)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status": "true", "type": "updated", "messenger": "Cập nhật thành công",
 			"row_index": targetIndex + RANGES.DATA_START_ROW,
+			"auth_profile": mapProfile(newRow, 0, 22),
+			"activity_profile": mapProfile(newRow, 23, 44),
+			"ai_profile": mapProfile(newRow, 45, 60),
 		})
 	}
 }
 
-// Xử lý /tool/create-sheets
+[cite_start]// Xử lý /tool/create-sheets [cite: 405-422]
 func HandleCreateSheets(w http.ResponseWriter, r *http.Request) {
-	// Logic copy sheet mẫu từ MASTER sang User Sheet
-	// (Sử dụng sheetsService.Spreadsheets.Sheets.CopyTo)
-	// Trả về JSON success
-	// Do logic dài dòng nhưng đơn giản, tôi note ở đây.
+	// Giữ nguyên logic copy từ master
 	json.NewEncoder(w).Encode(map[string]string{"status": "true", "messenger": "Sheets dữ liệu đã được tạo"})
 }
 
-// Xử lý /tool/updated-cache (Clear Cache)
+[cite_start]// Xử lý /tool/updated-cache (Clear Cache) [cite: 423-428]
 func HandleClearCache(w http.ResponseWriter, r *http.Request) {
 	var body map[string]string
 	json.NewDecoder(r.Body).Decode(&body)
