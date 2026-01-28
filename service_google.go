@@ -16,13 +16,11 @@ var sheetsService *sheets.Service
 func InitGoogleService(credJSON []byte) {
 	ctx := context.Background()
 	
-	// 🔥 ĐÃ XÓA: Cấu hình HTTP Client thủ công (nguyên nhân gây lỗi mất Auth)
-	// Go mặc định đã hỗ trợ Keep-Alive rất tốt.
+	// 🔥 FIX: Đã xóa toàn bộ cấu hình http.Client thủ công gây lỗi 403.
+	// Sử dụng Client mặc định của thư viện để đảm bảo Token được gửi đi đúng cách.
 
-	// Khởi tạo Service chuẩn
 	srv, err := sheets.NewService(ctx, 
 		option.WithCredentialsJSON(credJSON), 
-		// ❌ Đã bỏ dòng option.WithHTTPClient(...) để thư viện tự xử lý Auth
 		option.WithScopes(
 			"https://www.googleapis.com/auth/spreadsheets",
 			"https://www.googleapis.com/auth/drive",
@@ -36,20 +34,18 @@ func InitGoogleService(credJSON []byte) {
 	}
 	
 	sheetsService = srv
-	fmt.Println("✅ Google Service initialized (Fixed Auth).")
+	fmt.Println("✅ Google Service initialized (Standard Auth).")
 }
 
 // =================================================================================================
-// 🟢 CORE LOGIC (Sử dụng biến từ config.go)
+// 🟢 CORE LOGIC
 // =================================================================================================
 
 func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCacheData, error) {
-	if sheetsService == nil { 
-		return nil, fmt.Errorf("Google Sheets Service chưa kết nối") 
-	}
-
+	if sheetsService == nil { return nil, fmt.Errorf("Google Sheets Service chưa kết nối") }
 	if sheetName == "" { sheetName = SHEET_NAMES.DATA_TIKTOK }
 
+	// 1. Check RAM
 	cacheKey := spreadsheetId + KEY_SEPARATOR + sheetName
 	now := time.Now().UnixMilli()
 
@@ -66,6 +62,7 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 		return cache, nil
 	}
 
+	// 2. Load from Google
 	readRange := fmt.Sprintf("'%s'!A%d:%s%d", sheetName, RANGES.DATA_START_ROW, RANGES.LIMIT_COL_FULL, RANGES.DATA_MAX_ROW)
 	
 	resp, err := CallGoogleAPI(func() (interface{}, error) {
@@ -82,6 +79,7 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 
 	rawRows := valuesResp.Values
 	
+	// 3. Normalize
 	normalizedRawValues := make([][]interface{}, 0)
 	cleanValues := make([][]string, 0)
 	indices := make(map[string]map[string]int)
@@ -95,14 +93,10 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 
 	for i, row := range rawRows {
 		fullRow := make([]interface{}, 61)
-		for j, cell := range row {
-			if j < 61 { fullRow[j] = cell }
-		}
+		for j, cell := range row { if j < 61 { fullRow[j] = cell } }
 		
 		shortClean := make([]string, CACHE.CLEAN_COL_LIMIT)
-		for k := 0; k < CACHE.CLEAN_COL_LIMIT; k++ {
-			shortClean[k] = CleanString(fullRow[k])
-		}
+		for k := 0; k < CACHE.CLEAN_COL_LIMIT; k++ { shortClean[k] = CleanString(fullRow[k]) }
 
 		normalizedRawValues = append(normalizedRawValues, fullRow)
 		cleanValues = append(cleanValues, shortClean)
@@ -150,7 +144,6 @@ func CallGoogleAPI(fn func() (interface{}, error)) (interface{}, error) {
 }
 
 // --- QUEUE FUNCTIONS ---
-
 func QueueUpdate(sid string, sheetName string, rowIndex int, data []interface{}) {
 	q := GetQueue(sid)
 	q.Mutex.Lock()
