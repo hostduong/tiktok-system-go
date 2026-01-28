@@ -16,9 +16,9 @@ var sheetsService *sheets.Service
 func InitGoogleService(credJSON []byte) {
 	ctx := context.Background()
 	
-	// 🔥 FIX: Đã xóa toàn bộ cấu hình http.Client thủ công gây lỗi 403.
-	// Sử dụng Client mặc định của thư viện để đảm bảo Token được gửi đi đúng cách.
-
+	// 🔥 FIX QUAN TRỌNG: Xóa bỏ hoàn toàn option.WithHTTPClient
+	// Để thư viện Google tự quản lý Token và Kết nối (Tránh lỗi Unregistered Callers)
+	
 	srv, err := sheets.NewService(ctx, 
 		option.WithCredentialsJSON(credJSON), 
 		option.WithScopes(
@@ -34,18 +34,22 @@ func InitGoogleService(credJSON []byte) {
 	}
 	
 	sheetsService = srv
-	fmt.Println("✅ Google Service initialized (Standard Auth).")
+	fmt.Println("✅ Google Service initialized (Standard Auth - Config Linked).")
 }
 
 // =================================================================================================
-// 🟢 CORE LOGIC
+// 🟢 SHEET LOGIC (Sử dụng biến từ config.go)
 // =================================================================================================
 
 func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCacheData, error) {
-	if sheetsService == nil { return nil, fmt.Errorf("Google Sheets Service chưa kết nối") }
+	if sheetsService == nil { 
+		return nil, fmt.Errorf("Dịch vụ Google chưa khởi tạo thành công (Kiểm tra Log khởi động)") 
+	}
+
+	// Lấy tên mặc định từ config.go nếu không truyền vào
 	if sheetName == "" { sheetName = SHEET_NAMES.DATA_TIKTOK }
 
-	// 1. Check RAM
+	// 1. Check RAM Cache
 	cacheKey := spreadsheetId + KEY_SEPARATOR + sheetName
 	now := time.Now().UnixMilli()
 
@@ -55,6 +59,7 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 
 	hasPendingWrite := CheckPendingWrite(spreadsheetId, sheetName)
 	
+	// Dùng CACHE.SHEET_VALID_MS từ config.go
 	if !forceLoad && exists && ((now-cache.Timestamp < CACHE.SHEET_VALID_MS) || hasPendingWrite) {
 		STATE.SheetMutex.Lock()
 		cache.LastAccessed = now
@@ -63,6 +68,7 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 	}
 
 	// 2. Load from Google
+	// Dùng RANGES từ config.go
 	readRange := fmt.Sprintf("'%s'!A%d:%s%d", sheetName, RANGES.DATA_START_ROW, RANGES.LIMIT_COL_FULL, RANGES.DATA_MAX_ROW)
 	
 	resp, err := CallGoogleAPI(func() (interface{}, error) {
@@ -70,7 +76,8 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 	})
 	
 	if err != nil {
-		fmt.Printf("❌ [GOOGLE API ERROR] SID: %s | Range: %s | Error: %v\n", spreadsheetId, readRange, err)
+		// Log lỗi chi tiết để phân biệt lỗi 403 (Quyền) hay 404 (Không thấy file)
+		fmt.Printf("❌ [GOOGLE READ ERROR] SID: %s | Sheet: %s | Err: %v\n", spreadsheetId, sheetName, err)
 		return nil, err
 	}
 	
@@ -79,7 +86,7 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 
 	rawRows := valuesResp.Values
 	
-	// 3. Normalize
+	// 3. Normalize Data (Giống Node.js)
 	normalizedRawValues := make([][]interface{}, 0)
 	cleanValues := make([][]string, 0)
 	indices := make(map[string]map[string]int)
@@ -93,14 +100,19 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 
 	for i, row := range rawRows {
 		fullRow := make([]interface{}, 61)
-		for j, cell := range row { if j < 61 { fullRow[j] = cell } }
+		for j, cell := range row {
+			if j < 61 { fullRow[j] = cell }
+		}
 		
 		shortClean := make([]string, CACHE.CLEAN_COL_LIMIT)
-		for k := 0; k < CACHE.CLEAN_COL_LIMIT; k++ { shortClean[k] = CleanString(fullRow[k]) }
+		for k := 0; k < CACHE.CLEAN_COL_LIMIT; k++ {
+			shortClean[k] = CleanString(fullRow[k])
+		}
 
 		normalizedRawValues = append(normalizedRawValues, fullRow)
 		cleanValues = append(cleanValues, shortClean)
 
+		// Mapping Index từ config.go
 		if isDataTiktok {
 			uid := shortClean[INDEX_DATA_TIKTOK.USER_ID]
 			sec := shortClean[INDEX_DATA_TIKTOK.USER_SEC]
@@ -129,12 +141,14 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 	return newCache, nil
 }
 
+// CallGoogleAPI: Wrapper Retry
 func CallGoogleAPI(fn func() (interface{}, error)) (interface{}, error) {
 	retries := 3
 	for i := 0; i < retries; i++ {
 		res, err := fn()
 		if err == nil { return res, nil }
 		errStr := err.Error()
+		// Không retry nếu lỗi 403 (Permission), 404 (Not Found), 400 (Bad Request)
 		if strings.Contains(errStr, "400") || strings.Contains(errStr, "403") || strings.Contains(errStr, "404") || strings.Contains(errStr, "invalid") {
 			return nil, err
 		}
@@ -143,7 +157,8 @@ func CallGoogleAPI(fn func() (interface{}, error)) (interface{}, error) {
 	return nil, fmt.Errorf("Max retries exceeded")
 }
 
-// --- QUEUE FUNCTIONS ---
+// --- QUEUE FUNCTIONS (Sử dụng config.go) ---
+
 func QueueUpdate(sid string, sheetName string, rowIndex int, data []interface{}) {
 	q := GetQueue(sid)
 	q.Mutex.Lock()
