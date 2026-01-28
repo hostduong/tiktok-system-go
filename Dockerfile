@@ -1,27 +1,43 @@
-# --- Giai đoạn 1: Build ---
-FROM golang:1.24-alpine as builder
+# ==========================================
+# STAGE 1: Build (Biên dịch code)
+# ==========================================
+FROM golang:1.22-alpine AS builder
 
-# Cài git và tzdata (quan trọng cho giờ VN)
-RUN apk add --no-cache git tzdata
+# Cài đặt git (cần thiết để tải dependencies)
+RUN apk add --no-cache git
 
 WORKDIR /app
+
+# Copy file quản lý thư viện trước để tận dụng Docker cache
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy toàn bộ mã nguồn
 COPY . .
 
-# Reset module để tránh lỗi cache cũ
-RUN rm -f go.sum go.mod
-RUN go mod init tiktok-server
-RUN go mod tidy
+# Build file thực thi (Binary)
+# CGO_ENABLED=0: Tắt CGO để tạo static binary (chạy được mọi nơi)
+# -ldflags="-w -s": Loại bỏ thông tin debug để giảm dung lượng file
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o server .
 
-# Build binary nhỏ gọn
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o server main.go
+# ==========================================
+# STAGE 2: Run (Môi trường chạy)
+# ==========================================
+FROM alpine:latest
 
-# --- Giai đoạn 2: Run ---
-FROM gcr.io/distroless/static-debian12
+WORKDIR /root/
 
-# Copy múi giờ từ builder sang (Sửa lỗi panic time)
-COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+# Cài đặt CA Certificates để gọi HTTPS (Google API, Firebase) không bị lỗi SSL
+RUN apk --no-cache add ca-certificates tzdata
+
+# Copy file thực thi từ bước Build
+COPY --from=builder /app/server .
+
+# Thiết lập múi giờ Việt Nam (Tùy chọn, tốt cho log)
 ENV TZ=Asia/Ho_Chi_Minh
 
-COPY --from=builder /app/server /server
+# Mở port 8080 (Cloud Run mặc định)
 EXPOSE 8080
-CMD ["/server"]
+
+# Chạy server
+CMD ["./server"]
