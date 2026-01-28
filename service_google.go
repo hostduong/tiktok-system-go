@@ -13,14 +13,14 @@ import (
 
 var sheetsService *sheets.Service
 
-// InitGoogleService: Khởi tạo kết nối Google Sheet
-// 🔥 LƯU Ý: Không dùng credJSON ở đây nữa để giống Node.js (Dùng ADC - Quyền của Server Cloud Run)
 func InitGoogleService(credJSON []byte) {
 	ctx := context.Background()
 	
-	// Node.js dòng 18: new google.auth.GoogleAuth() không truyền key
-	// Nên Go cũng vậy, chỉ truyền Scopes, để thư viện tự lấy quyền của Cloud Run (Gmail A)
+	// 🔥 FIX 1: Xóa bỏ cấu hình http.Client thủ công (Nguyên nhân gây lỗi "Unregistered callers")
+	// 🔥 FIX 2: Khôi phục lại WithCredentialsJSON (Nguyên nhân gây lỗi "Deployment failed" do ADC bị treo)
+	
 	srv, err := sheets.NewService(ctx, 
+		option.WithCredentialsJSON(credJSON), // Dùng Key của Gmail B (hostduong-1991)
 		option.WithScopes(
 			"https://www.googleapis.com/auth/spreadsheets",
 			"https://www.googleapis.com/auth/drive",
@@ -34,11 +34,11 @@ func InitGoogleService(credJSON []byte) {
 	}
 	
 	sheetsService = srv
-	fmt.Println("✅ Google Service initialized (Using Cloud Run Identity - ADC).")
+	fmt.Println("✅ Google Service initialized (Stable JSON Auth).")
 }
 
 // =================================================================================================
-// 🟢 CORE LOGIC (Sử dụng biến từ config.go)
+// 🟢 CORE LOGIC (Linked with config.go)
 // =================================================================================================
 
 func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCacheData, error) {
@@ -82,7 +82,7 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 
 	rawRows := valuesResp.Values
 	
-	// 3. Normalize
+	// 3. Normalize Data
 	normalizedRawValues := make([][]interface{}, 0)
 	cleanValues := make([][]string, 0)
 	indices := make(map[string]map[string]int)
