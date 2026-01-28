@@ -10,16 +10,15 @@ import (
 )
 
 type UpdateResponse struct {
-	Status          string            `json:"status"`
-	Type            string            `json:"type"`
-	Messenger       string            `json:"messenger"`
-	RowIndex        int               `json:"row_index,omitempty"`
-	AuthProfile     map[string]string `json:"auth_profile"`
-	ActivityProfile map[string]string `json:"activity_profile"`
-	AiProfile       map[string]string `json:"ai_profile"`
+	Status          string          `json:"status"`
+	Type            string          `json:"type"`
+	Messenger       string          `json:"messenger"`
+	RowIndex        int             `json:"row_index,omitempty"`
+	AuthProfile     AuthProfile     `json:"auth_profile"`     // 🔥 Dùng Struct
+	ActivityProfile ActivityProfile `json:"activity_profile"` // 🔥 Dùng Struct
+	AiProfile       AiProfile       `json:"ai_profile"`       // 🔥 Dùng Struct
 }
 
-// 🔥 Đổi tên hàm thành HandleUpdateData khớp main.go
 func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 	var body map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -33,7 +32,6 @@ func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 🔥 FIX: SpreadsheetID viết hoa chữ D
 	sid := tokenData.SpreadsheetID
 	deviceId := CleanString(body["deviceId"])
 
@@ -68,7 +66,6 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 	} else { isAppend = true }
 
 	var newRow []interface{}
-	// 🔥 FIX: Đã xóa biến oldNote không dùng
 	
 	if isAppend {
 		newRow = make([]interface{}, 61)
@@ -109,18 +106,18 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 		
 		return &UpdateResponse{
 			Status: "true", Type: "updated", Messenger: "Thêm mới thành công",
-			AuthProfile: mapProfileSafe(newRow, 0, 22),
-			ActivityProfile: mapProfileSafe(newRow, 23, 44),
-			AiProfile: mapProfileSafe(newRow, 45, 60),
+			AuthProfile:     MakeAuthProfile(newRow),
+			ActivityProfile: MakeActivityProfile(newRow),
+			AiProfile:       MakeAiProfile(newRow),
 		}, nil
 	} else {
 		QueueUpdate(sid, sheetName, targetIndex, newRow)
 		return &UpdateResponse{
 			Status: "true", Type: "updated", Messenger: "Cập nhật thành công",
 			RowIndex: RANGES.DATA_START_ROW + targetIndex,
-			AuthProfile: mapProfileSafe(newRow, 0, 22),
-			ActivityProfile: mapProfileSafe(newRow, 23, 44),
-			AiProfile: mapProfileSafe(newRow, 45, 60),
+			AuthProfile:     MakeAuthProfile(newRow),
+			ActivityProfile: MakeActivityProfile(newRow),
+			AiProfile:       MakeAiProfile(newRow),
 		}, nil
 	}
 }
