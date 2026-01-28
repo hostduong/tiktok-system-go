@@ -17,6 +17,7 @@ var sheetsService *sheets.Service
 func InitGoogleService(credJSON []byte) {
 	ctx := context.Background()
 	
+	// Cấu hình HTTP Client tối ưu (Keep-Alive giống Node.js)
 	httpClient := &http.Client{
 		Transport: &http.Transport{
 			MaxIdleConns:        100,
@@ -26,7 +27,7 @@ func InitGoogleService(credJSON []byte) {
 		Timeout: 30 * time.Second,
 	}
 
-	// Thêm Scopes giống Node.js
+	// Khởi tạo Service với Scopes đầy đủ (Sheet + Drive)
 	srv, err := sheets.NewService(ctx, 
 		option.WithCredentialsJSON(credJSON), 
 		option.WithHTTPClient(httpClient),
@@ -37,26 +38,26 @@ func InitGoogleService(credJSON []byte) {
 	)
 	
 	if err != nil {
-		// 🔥 FIX: Thay log.Fatalf (chết luôn) bằng log.Printf (chỉ báo lỗi)
-		// Server sẽ vẫn chạy tiếp để bạn vào xem log được
 		log.Printf("❌ [CRITICAL] Google Sheets Init Error: %v", err)
 		sheetsService = nil
 		return
 	}
 	
 	sheetsService = srv
-	fmt.Println("✅ Google Service initialized (With Scopes).")
+	fmt.Println("✅ Google Service initialized (Linked with config.go).")
 }
 
 // =================================================================================================
-// 🟢 SHEET LOAD & CACHE LOGIC
+// 🟢 CORE LOGIC (Sử dụng biến từ config.go)
 // =================================================================================================
 
 func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCacheData, error) {
-	// Kiểm tra xem Service có khởi tạo thành công không
-	if sheetsService == nil {
-		return nil, fmt.Errorf("Google Sheets Service chưa được khởi tạo (Lỗi API/Key)")
+	if sheetsService == nil { 
+		return nil, fmt.Errorf("Google Sheets Service chưa kết nối") 
 	}
+
+	// Nếu không truyền tên sheet, lấy mặc định từ config.go
+	if sheetName == "" { sheetName = SHEET_NAMES.DATA_TIKTOK }
 
 	// 1. Check RAM
 	cacheKey := spreadsheetId + KEY_SEPARATOR + sheetName
@@ -76,6 +77,7 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 	}
 
 	// 2. Load from Google
+	// 🔥 SỬ DỤNG BIẾN TỪ FILE config.go
 	readRange := fmt.Sprintf("'%s'!A%d:%s%d", sheetName, RANGES.DATA_START_ROW, RANGES.LIMIT_COL_FULL, RANGES.DATA_MAX_ROW)
 	
 	resp, err := CallGoogleAPI(func() (interface{}, error) {
@@ -83,7 +85,8 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 	})
 	
 	if err != nil {
-		fmt.Printf("❌ [GOOGLE API ERROR] SID: %s | Sheet: %s | Error: %v\n", spreadsheetId, sheetName, err)
+		// Log lỗi chi tiết để debug (ví dụ: 403 Forbidden, 404 Not Found)
+		fmt.Printf("❌ [GOOGLE API ERROR] SID: %s | Range: %s | Error: %v\n", spreadsheetId, readRange, err)
 		return nil, err
 	}
 	
@@ -92,7 +95,7 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 
 	rawRows := valuesResp.Values
 	
-	// 3. Normalize
+	// 3. Normalize Data
 	normalizedRawValues := make([][]interface{}, 0)
 	cleanValues := make([][]string, 0)
 	indices := make(map[string]map[string]int)
@@ -110,6 +113,7 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 			if j < 61 { fullRow[j] = cell }
 		}
 		
+		// Sử dụng CACHE.CLEAN_COL_LIMIT từ config.go
 		shortClean := make([]string, CACHE.CLEAN_COL_LIMIT)
 		for k := 0; k < CACHE.CLEAN_COL_LIMIT; k++ {
 			shortClean[k] = CleanString(fullRow[k])
@@ -118,6 +122,7 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 		normalizedRawValues = append(normalizedRawValues, fullRow)
 		cleanValues = append(cleanValues, shortClean)
 
+		// Sử dụng INDEX_DATA_TIKTOK từ config.go
 		if isDataTiktok {
 			uid := shortClean[INDEX_DATA_TIKTOK.USER_ID]
 			sec := shortClean[INDEX_DATA_TIKTOK.USER_SEC]
@@ -146,13 +151,14 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 	return newCache, nil
 }
 
-// CallGoogleAPI Wrapper
+// Helper: Gọi API có Retry
 func CallGoogleAPI(fn func() (interface{}, error)) (interface{}, error) {
 	retries := 3
 	for i := 0; i < retries; i++ {
 		res, err := fn()
 		if err == nil { return res, nil }
 		errStr := err.Error()
+		// Không retry nếu lỗi Permission (403), Not Found (404), Bad Request (400)
 		if strings.Contains(errStr, "400") || strings.Contains(errStr, "403") || strings.Contains(errStr, "404") || strings.Contains(errStr, "invalid") {
 			return nil, err
 		}
@@ -161,7 +167,8 @@ func CallGoogleAPI(fn func() (interface{}, error)) (interface{}, error) {
 	return nil, fmt.Errorf("Max retries exceeded")
 }
 
-// --- QUEUE FUNCTIONS (Giữ nguyên) ---
+// --- QUEUE FUNCTIONS (Sử dụng config.go) ---
+
 func QueueUpdate(sid string, sheetName string, rowIndex int, data []interface{}) {
 	q := GetQueue(sid)
 	q.Mutex.Lock()
@@ -213,11 +220,12 @@ func FlushQueue(sid string, isShutdown bool) {
 		q.Mutex.Unlock()
 	}()
 
-	if sheetsService == nil { return } // Bảo vệ nếu service chưa init
+	if sheetsService == nil { return }
 
 	valueUpdates := []*sheets.ValueRange{}
 	for sheetName, rowsMap := range updatesSnapshot {
 		for rIdx, data := range rowsMap {
+			// Sử dụng RANGES.DATA_START_ROW từ config.go
 			actualRow := RANGES.DATA_START_ROW + rIdx
 			rng := fmt.Sprintf("'%s'!A%d:%s%d", sheetName, actualRow, RANGES.LIMIT_COL_FULL, actualRow)
 			valueUpdates = append(valueUpdates, &sheets.ValueRange{ Range: rng, Values: [][]interface{}{data} })
@@ -273,6 +281,7 @@ func FlushMailQueue(sid string, isShutdown bool) {
 	if len(rowsToFlush) == 0 || sheetsService == nil { return }
 	batchRequests := []*sheets.ValueRange{}
 	for _, rIdx := range rowsToFlush {
+		// Sử dụng SHEET_NAMES.EMAIL_LOGGER từ config.go
 		rng := fmt.Sprintf("'%s'!H%d", SHEET_NAMES.EMAIL_LOGGER, rIdx)
 		batchRequests = append(batchRequests, &sheets.ValueRange{ Range: rng, Values: [][]interface{}{{"TRUE"}} })
 	}
@@ -281,7 +290,7 @@ func FlushMailQueue(sid string, isShutdown bool) {
 	})
 }
 
-func CleanupEmail(sid string) {} // Stub
+func CleanupEmail(sid string) {} 
 
 func GetQueue(sid string) *WriteQueueData {
 	STATE.QueueMutex.Lock()
