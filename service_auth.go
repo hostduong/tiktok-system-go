@@ -18,52 +18,63 @@ import (
 	"google.golang.org/api/option"
 )
 
-// Biến toàn cục lưu kết nối Database và lỗi khởi tạo
+// =================================================================================================
+// 📦 BIẾN TOÀN CỤC & CẤU TRÚC DỮ LIỆU
+// =================================================================================================
+
+// firebaseDB: Lưu kết nối database để dùng chung cho toàn bộ ứng dụng (tránh kết nối lại nhiều lần)
 var firebaseDB *db.Client
+
+// AuthInitError: Lưu lỗi nếu quá trình khởi tạo Firebase thất bại (để Middleware biết đường chặn)
 var AuthInitError error
 
-// =================================================================================================
-// 🔧 CẤU HÌNH TOKEN & RATE LIMIT (Centralized Config)
-// =================================================================================================
-
+// TOKEN_RULES: Nơi tập trung toàn bộ cấu hình về bảo mật và giới hạn tốc độ.
+// Sửa ở đây sẽ áp dụng cho toàn hệ thống.
 var TOKEN_RULES = struct {
-	GLOBAL_MAX_REQ int   // Giới hạn request toàn server / giây
-	TOKEN_MAX_REQ  int   // Giới hạn request mỗi token / giây
-	WINDOW_MS      int64 // Cửa sổ thời gian tính rate limit (ms)
-	MIN_LENGTH     int   // Độ dài tối thiểu của token
-	CACHE_TTL_MS   int64 // Thời gian lưu cache RAM (60 phút)
-	BLOCK_TTL_MS   int64 // Thời gian chặn token sai (1 phút)
+	GLOBAL_MAX_REQ int   // Số lượng request tối đa Server chịu được trong 1 giây (Lớp 0)
+	TOKEN_MAX_REQ  int   // Số lượng request tối đa 1 Token được gửi trong 1 giây (Lớp 2)
+	WINDOW_MS      int64 // Khoảng thời gian để reset bộ đếm (đơn vị: mili giây)
+	MIN_LENGTH     int   // Độ dài tối thiểu của Token hợp lệ
+	CACHE_TTL_MS   int64 // Thời gian lưu Token ĐÚNG trong RAM (để đỡ tốn tiền đọc DB)
+	BLOCK_TTL_MS   int64 // Thời gian chặn Token SAI trong RAM (chống Spam)
 }{
-	GLOBAL_MAX_REQ: 1000,
-	TOKEN_MAX_REQ:  5,
-	WINDOW_MS:      1000,
-	MIN_LENGTH:     10,
-	CACHE_TTL_MS:   3600000, // 1 giờ
-	BLOCK_TTL_MS:   60000,   // 60 giây
+	GLOBAL_MAX_REQ: 1000,    // 1000 req/s cho toàn server
+	TOKEN_MAX_REQ:  5,       // 5 req/s cho mỗi user
+	WINDOW_MS:      1000,    // Reset đếm sau mỗi 1 giây
+	MIN_LENGTH:     10,      // Token phải dài hơn 10 ký tự
+	CACHE_TTL_MS:   3600000, // Cache sống 60 phút (1 giờ)
+	BLOCK_TTL_MS:   60000,   // Nếu sai, chặn 60 giây (1 phút)
+}
+
+// TokenRequest: Struct dùng để hứng JSON từ client gửi lên.
+// Dùng struct nhanh hơn map[string]interface{} về hiệu năng.
+type TokenRequest struct {
+	Token string `json:"token"` // Trường "token" trong JSON body
 }
 
 // =================================================================================================
-// 🚀 PHẦN 1: KHỞI TẠO & MIDDLEWARE (Xử lý Request)
+// 🚀 PHẦN 1: KHỞI TẠO & MIDDLEWARE (CỔNG VÀO)
 // =================================================================================================
 
-// InitAuthService: Khởi tạo kết nối đến Firebase
+// InitAuthService: Hàm này chạy 1 lần duy nhất khi Server khởi động (trong main.go).
+// Nhiệm vụ: Kết nối tới Firebase Realtime Database.
 func InitAuthService(credJSON []byte) {
-	// Kiểm tra nếu không có key JSON
+	// Bước 1: Kiểm tra xem biến môi trường chứa Key có dữ liệu không
 	if len(credJSON) == 0 {
-		AuthInitError = fmt.Errorf("Dữ liệu Credential bị trống")
+		AuthInitError = fmt.Errorf("Dữ liệu Credential bị trống (Chưa set Env Var)")
 		log.Println("❌ [AUTH INIT] " + AuthInitError.Error())
 		return
 	}
 
+	// Bước 2: Chuẩn bị cấu hình kết nối
 	ctx := context.Background()
-	opt := option.WithCredentialsJSON(credJSON)
-	
-	// Cấu hình URL Database (Phải chuẩn theo Firebase Console)
+	opt := option.WithCredentialsJSON(credJSON) // Dùng JSON Key để xác thực
 	conf := &firebase.Config{
+		// URL Database của Project Firebase (Phải chính xác 100%)
 		DatabaseURL: "https://hostduong-1991-default-rtdb.asia-southeast1.firebasedatabase.app",
 	}
 
-	// Tạo App Firebase
+	// Bước 3: Khởi tạo Firebase App
 	app, err := firebase.NewApp(ctx, conf, opt)
 	if err != nil {
 		AuthInitError = fmt.Errorf("Lỗi khởi tạo Firebase App: %v", err)
@@ -71,7 +82,7 @@ func InitAuthService(credJSON []byte) {
 		return
 	}
 
-	// Tạo Client Database
+	// Bước 4: Lấy Client Database từ App
 	client, err := app.Database(ctx)
 	if err != nil {
 		AuthInitError = fmt.Errorf("Lỗi kết nối Database: %v", err)
@@ -79,179 +90,186 @@ func InitAuthService(credJSON []byte) {
 		return
 	}
 
-	// Gán vào biến toàn cục để dùng sau này
+	// Thành công: Gán vào biến toàn cục
 	firebaseDB = client
-	fmt.Println("✅ Firebase Service initialized (V4) - Standard Response Edition.")
+	fmt.Println("✅ Firebase Service initialized (V4) - Documented Version.")
 }
 
-// AuthMiddleware: Cánh cổng bảo vệ, kiểm tra Token trước khi vào Controller
+// AuthMiddleware: Đây là "Người bảo vệ" đứng trước mọi API.
+// Nhiệm vụ: Chặn request rác, kiểm tra Token, giới hạn tốc độ.
 func AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 1. [LỚP 0] Global Rate Limit (Chặn tấn công DDoS)
+		
+		// 🛡️ LỚP 0: Kiểm tra quá tải Server (Global Rate Limit)
+		// Nếu Server đang nhận quá 1000 req/s -> Từ chối ngay để bảo vệ CPU.
 		if !CheckGlobalRateLimit() {
 			http.Error(w, `{"status":"false","messenger":"Server Busy (Global Limit)"}`, 503)
 			return
 		}
 
-		// Kiểm tra kết nối DB
+		// Kiểm tra xem Database có đang kết nối ổn không
 		if firebaseDB == nil {
-			http.Error(w, `{"status":"false","messenger":"Lỗi kết nối Database"}`, 503)
+			http.Error(w, `{"status":"false","messenger":"Database Connecting..."}`, 503)
 			return
 		}
 
-		// Đọc Body request một cách an toàn (để có thể đọc lại sau này)
+		// 🛡️ ĐỌC DỮ LIỆU: Đọc Body JSON một cách an toàn
+		// Cần đọc ra bytes rồi ghi lại vào Body để các hàm sau (như Login) có thể đọc lại.
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, `{"status":"false","messenger":"Read Body Error"}`, 400)
 			return
 		}
-		// Trả lại body cho request để các hàm sau có thể đọc tiếp
+		// "Tái sinh" body sau khi đã đọc
 		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
-		// Parse JSON để lấy Token
-		var bodyMap map[string]interface{}
-		if err := json.Unmarshal(bodyBytes, &bodyMap); err != nil {
+		// Parse JSON để lấy Token ra kiểm tra
+		var req TokenRequest
+		if err := json.Unmarshal(bodyBytes, &req); err != nil {
+			// Nếu JSON sai định dạng -> Báo lỗi
 			http.Error(w, `{"status":"false","messenger":"JSON Error"}`, 400)
 			return
 		}
 
-		// Lấy chuỗi Token và xóa khoảng trắng thừa
-		tokenRaw, _ := bodyMap["token"].(string)
-		tokenStr := strings.TrimSpace(tokenRaw)
+		// Chuẩn hóa Token: Xóa khoảng trắng thừa đầu đuôi
+		tokenStr := strings.TrimSpace(req.Token)
 		
-		// 2. [LỚP 1] Check Token (Quy trình: RAM -> Firebase -> Cache)
+		// 🛡️ LỚP 1: Kiểm tra tính hợp lệ của Token (Core Logic)
+		// Hàm này sẽ tự động check Cache RAM trước, nếu không có mới gọi Firebase.
 		authRes := CheckToken(tokenStr)
 		
-		// 🔥 XỬ LÝ LỖI CHUẨN FORM (Error vs False)
+		// Nếu Token KHÔNG hợp lệ
 		if !authRes.IsValid {
 			w.Header().Set("Content-Type", "application/json")
 			
-			// Mặc định là lỗi nghiệp vụ (false)
-			status := "false"
+			status := "false" // Mặc định là lỗi có thể thử lại (false)
 			
-			// Các trường hợp lỗi cấu trúc/dữ liệu thì trả về "error"
-			switch authRes.Messenger {
-			case "Token hết hạn hoặc không tồn tại":
-				status = "error"
-			case "Không có spreadsheetsId":
-				status = "error"
-			case "Token không hợp lệ": // Trường hợp token quá ngắn/rỗng
+			// Phân loại lỗi: Nếu lỗi nghiêm trọng (Fatal) -> Trả về "error" để Client dừng luôn
+			if isFatalError(authRes.Messenger) {
 				status = "error"
 			}
 
-			// Trả về JSON chuẩn theo yêu cầu
+			// Trả về kết quả cho Client
 			json.NewEncoder(w).Encode(map[string]string{
 				"status":    status,
 				"messenger": authRes.Messenger,
 			})
-			return
+			return // Dừng xử lý tại đây
 		}
 
-		// 3. [LỚP 2] User Rate Limit (Chống spam từng user)
+		// 🛡️ LỚP 2: Kiểm tra User Rate Limit (Công bằng)
+		// Token đúng nhưng spam quá nhanh ( > 5 req/s) -> Chặn tạm thời.
 		if !CheckUserRateLimit(tokenStr) {
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(429) // Mã lỗi Too Many Requests
+			w.WriteHeader(429) // 429 = Too Many Requests
 			json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": "Spam detected (Rate Limit)"})
 			return
 		}
 
-		// Token hợp lệ -> Lưu thông tin vào Context để các hàm sau dùng
+		// ✅ THÀNH CÔNG: Lưu thông tin Token vào Context
+		// Để các hàm xử lý phía sau (HandlerLogin, HandlerUpdate) có thể dùng ngay mà không cần query lại.
 		ctx := context.WithValue(r.Context(), "tokenData", &TokenData{
 			Token:         tokenStr,
 			SpreadsheetID: authRes.SpreadsheetID,
 			Data:          authRes.Data,
 		})
 
-		// Chuyển tiếp sang hàm xử lý chính
+		// Chuyển tiếp request đến hàm xử lý nghiệp vụ
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
 // =================================================================================================
-// 🛡️ PHẦN 2: LOGIC CHECK TOKEN & TIME PARSER (NGHIỆP VỤ CỐT LÕI)
+// 🧠 PHẦN 2: LOGIC CHECK TOKEN & TIME PARSER (BỘ NÃO)
 // =================================================================================================
 
-// CheckToken: Hàm kiểm tra tính hợp lệ của Token
+// CheckToken: Hàm kiểm tra Token toàn diện (RAM -> DB -> Time Check)
 func CheckToken(token string) AuthResult {
-	// 1. Kiểm tra định dạng cơ bản (Rỗng hoặc quá ngắn)
+	// 1. Kiểm tra sơ bộ: Rỗng hoặc quá ngắn -> Loại ngay
 	if token == "" || len(token) < TOKEN_RULES.MIN_LENGTH {
-		// Trả về message khớp với case 1: "Token hết hạn hoặc không tồn tại" (hoặc sai định dạng)
-		// Theo yêu cầu của bạn "token sai hoặc không có", ta gom chung vào message này
-		return AuthResult{IsValid: false, Messenger: "Token hết hạn hoặc không tồn tại"}
+		return AuthResult{IsValid: false, Messenger: "Token không hợp lệ"} // Lỗi chết
 	}
 
 	now := time.Now().UnixMilli()
 
-	// 2. Kiểm tra trong Cache RAM trước (Tốc độ cao)
-	STATE.TokenMutex.RLock()
+	// 2. KIỂM TRA CACHE RAM (Tốc độ cao)
+	STATE.TokenMutex.RLock() // Khóa đọc (cho phép nhiều người đọc cùng lúc)
 	cached, exists := STATE.TokenCache[token]
-	STATE.TokenMutex.RUnlock()
+	STATE.TokenMutex.RUnlock() // Mở khóa ngay lập tức
 
 	if exists {
-		// Nếu là Cache chặn (Token rác/sai đã bị nhớ trước đó)
+		// Nếu tìm thấy trong Cache:
 		if cached.IsInvalid {
+			// Đây là Token rác đã bị nhớ (Negative Cache)
 			if now < cached.ExpiryTime {
+				// Vẫn trong thời gian phạt -> Chặn ngay
 				return AuthResult{IsValid: false, Messenger: cached.Msg}
 			}
-			// Hết thời gian phạt -> Xóa cache để check lại Firebase
+			// Hết thời gian phạt -> Xóa cache để kiểm tra lại (biết đâu user đã gia hạn)
 			deleteTokenCache(token)
 		} else {
-			// Cache hợp lệ (Token đúng đã nhớ)
+			// Đây là Token đúng đã được lưu (Positive Cache)
 			if now < cached.ExpiryTime {
+				// Vẫn còn hạn Cache -> Trả về thông tin ngay
 				return AuthResult{IsValid: true, SpreadsheetID: cached.Data.SpreadsheetID, Data: cached.Data.Data}
 			}
-			// Hết hạn cache -> Xóa để lấy thông tin mới nhất từ Firebase
+			// Hết hạn Cache -> Xóa để query lại Firebase lấy dữ liệu mới nhất
 			deleteTokenCache(token)
 		}
 	}
 
-	// 3. Kiểm tra Firebase (Nếu không có trong Cache)
+	// 3. KIỂM TRA FIREBASE (Nếu Cache không có)
 	if firebaseDB == nil {
-		return AuthResult{IsValid: false, Messenger: "Lỗi kết nối Database"}
+		return AuthResult{IsValid: false, Messenger: "Database chưa sẵn sàng"}
 	}
 
+	// Tạo tham chiếu đến node chứa Token
 	ref := firebaseDB.NewRef("TOKEN_TIKTOK/" + token)
 	var data map[string]interface{}
 	
-	// Gọi Firebase
+	// Gọi API Firebase (Tốn thời gian mạng)
 	if err := ref.Get(context.Background(), &data); err != nil {
 		log.Printf("❌ [FIREBASE ERROR] %v", err)
-		return AuthResult{IsValid: false, Messenger: "Lỗi kết nối Database"}
+		return AuthResult{IsValid: false, Messenger: "Lỗi kết nối Database"} // Cho phép thử lại
 	}
 
-	// CASE 1: Token không tồn tại trong DB -> Cache chặn
+	// --- PHÂN TÍCH KẾT QUẢ TỪ FIREBASE ---
+
+	// Trường hợp: Token không tồn tại
 	if data == nil {
-		setCache(token, nil, true, "Token hết hạn hoặc không tồn tại", TOKEN_RULES.BLOCK_TTL_MS)
-		return AuthResult{IsValid: false, Messenger: "Token hết hạn hoặc không tồn tại"}
+		// Lưu vào Cache Chặn (để lần sau không phải hỏi Firebase nữa)
+		setCache(token, nil, true, "Token không tồn tại", TOKEN_RULES.BLOCK_TTL_MS)
+		return AuthResult{IsValid: false, Messenger: "Token không tồn tại"}
 	}
 
-	// CASE 4: Token tồn tại nhưng thiếu dữ liệu quan trọng -> Cache chặn
+	// Trường hợp: Dữ liệu bị thiếu (Hư hỏng)
 	if data["expired"] == nil {
 		setCache(token, nil, true, "Token lỗi data (Thiếu expired)", TOKEN_RULES.BLOCK_TTL_MS)
 		return AuthResult{IsValid: false, Messenger: "Token lỗi data"}
 	}
 	if data["spreadsheetId"] == nil {
-		// Yêu cầu: status error, msg: Không có spreadsheetsId
 		setCache(token, nil, true, "Không có spreadsheetsId", TOKEN_RULES.BLOCK_TTL_MS)
 		return AuthResult{IsValid: false, Messenger: "Không có spreadsheetsId"}
 	}
 
-	// CASE 2: Kiểm tra Hạn sử dụng (Smart Time Parse)
+	// 4. KIỂM TRA HẠN SỬ DỤNG (Smart Time Check)
 	expStr := fmt.Sprintf("%v", data["expired"])
-	expTime := parseSmartTime(expStr)
+	expTime := parseSmartTime(expStr) // Dùng bộ parse thông minh
 	
 	timeLeft := expTime.Sub(time.Now()).Milliseconds()
 
-	// Nếu parse lỗi hoặc thời gian còn lại <= 0
+	// Nếu parse lỗi hoặc thời gian còn lại <= 0 -> Hết hạn
 	if expTime.IsZero() || timeLeft <= 0 {
-		setCache(token, nil, true, "Token đã hết hạn", TOKEN_RULES.BLOCK_TTL_MS)
-		return AuthResult{IsValid: false, Messenger: "Token đã hết hạn"}
+		setCache(token, nil, true, "Token hết hạn", TOKEN_RULES.BLOCK_TTL_MS)
+		return AuthResult{IsValid: false, Messenger: "Token hết hạn"}
 	}
 
-	// CASE: Thành công (Token ngon) -> Cache Positive
+	// 5. CACHE THÀNH CÔNG (Token Ngon)
 	sid := fmt.Sprintf("%v", data["spreadsheetId"])
 	
-	// Logic TTL Cache: Cache sống bằng thời gian còn lại của Token, nhưng không quá 1 giờ
+	// Tính thời gian sống của Cache (TTL)
+	// Cache sống = Min(Thời gian quy định, Thời gian còn lại của Token)
+	// Để tránh việc Token hết hạn 10s nữa nhưng Cache vẫn lưu 60 phút.
 	ttl := TOKEN_RULES.CACHE_TTL_MS
 	if ttl > timeLeft {
 		ttl = timeLeft
@@ -263,45 +281,48 @@ func CheckToken(token string) AuthResult {
 		Data:          data,
 		Expired:       expStr,
 	}
+	// Lưu vào Cache RAM
 	setCache(token, &validData, false, "", ttl)
 
+	// Trả về kết quả Thành công
 	return AuthResult{IsValid: true, SpreadsheetID: sid, Data: data}
 }
 
-// Hàm parse thời gian thông minh (Hỗ trợ số, ISO, Date Only)
+// parseSmartTime: Bộ phân tích thời gian đa năng
+// Hỗ trợ: Timestamp số, ISO 8601, Ngày/Tháng/Năm VN...
 func parseSmartTime(dateStr string) time.Time {
-	// Múi giờ Việt Nam cứng (+7)
+	// Ép cứng múi giờ Việt Nam (+7)
 	vnZone := time.FixedZone("UTC+7", 7*3600)
 	s := strings.TrimSpace(dateStr)
 
-	// 1. Kiểm tra dạng số (Timestamp)
+	// 1. Kiểm tra dạng số (Timestamp) - Ưu tiên cao nhất
 	if ts, err := strconv.ParseInt(s, 10, 64); err == nil {
-		// Nếu > 10^11 thì là milliseconds (vì 10^11 giây là năm 5138)
-		if ts > 100000000000 { 
+		// Nếu số lớn hơn 100 tỷ -> Là mili giây (vì 100 tỷ giây = năm 5138)
+		if ts > 100_000_000_000 {
 			return time.UnixMilli(ts).In(vnZone)
 		}
+		// Ngược lại là giây
 		return time.Unix(ts, 0).In(vnZone)
 	}
 
-	// 2. Kiểm tra chuẩn ISO-8601 / RFC3339 (Có sẵn múi giờ hoặc UTC)
+	// 2. Kiểm tra chuẩn Quốc tế (RFC3339 / ISO 8601)
+	// Ví dụ: 2026-01-29T06:03:55+07:00
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t.In(vnZone)
 	}
-	// Fallback cho ISO thiếu Timezone: 2026-01-29T06:03:55 -> Gán VN Zone
+	// Fallback: ISO thiếu Timezone -> Tự gán VN Zone
 	if t, err := time.ParseInLocation("2006-01-02T15:04:05", s, vnZone); err == nil {
 		return t
 	}
 
-	// 3. Xử lý Date-Only (Chỉ có ngày -> Chuyển thành cuối ngày 23:59:59)
-	// Điều kiện: Có chứa dấu phân cách ngày (/ hoặc -) VÀ KHÔNG chứa dấu giờ (:)
-	hasSep := strings.Contains(s, "/") || strings.Contains(s, "-")
-	hasTime := strings.Contains(s, ":")
-	
-	if hasSep && !hasTime {
+	// 3. Xử lý Date-Only (Chỉ có ngày, thiếu giờ)
+	// Nếu có dấu phân cách ngày (/ hoặc -) và KHÔNG có dấu giờ (:)
+	// -> Tự động cộng thêm 23:59:59 để tính hết hạn vào cuối ngày.
+	if isDateOnly(s) {
 		s += " 23:59:59"
 	}
 
-	// 4. Kiểm tra các định dạng quen thuộc VN
+	// 4. Kiểm tra các định dạng Việt Nam phổ biến
 	layouts := []string{
 		"02/01/2006 15:04:05", // dd/MM/yyyy HH:mm:ss
 		"02-01-2006 15:04:05", // dd-MM-yyyy HH:mm:ss
@@ -309,60 +330,97 @@ func parseSmartTime(dateStr string) time.Time {
 	}
 
 	for _, layout := range layouts {
+		// ParseInLocation bắt buộc hiểu theo giờ VN
 		if t, err := time.ParseInLocation(layout, s, vnZone); err == nil {
 			return t
 		}
 	}
 
-	// 5. Thất bại -> Trả về time.Zero (Coi như hết hạn)
+	// 5. Thất bại toàn tập -> Trả về time.Zero (Coi như hết hạn)
 	return time.Time{}
 }
 
 // =================================================================================================
-// ⚙️ PHẦN 3: HÀM HỖ TRỢ (HELPERS)
+// 🛠️ PHẦN 3: CÁC HÀM HỖ TRỢ (HELPERS)
 // =================================================================================================
 
-// Kiểm tra Global Rate Limit (Có Reset mỗi giây)
+// isFatalError: Xác định xem lỗi này có nghiêm trọng không.
+// True = Lỗi chết (Dừng tool, status: error)
+// False = Lỗi tạm thời (Thử lại sau, status: false)
+func isFatalError(msg string) bool {
+	// Chuẩn hóa chuỗi về chữ thường và xóa khoảng trắng thừa
+	msg = strings.ToLower(strings.TrimSpace(msg))
+
+	// Lọc nhanh: Nếu không bắt đầu bằng các từ khóa chính -> Không phải lỗi Auth
+	// (Đây là logic phòng thủ để tránh bắt nhầm lỗi khác)
+	if !strings.HasPrefix(msg, "token") && !strings.HasPrefix(msg, "không có") {
+		return false
+	}
+
+	// Kiểm tra từ khóa
+	switch {
+	case strings.Contains(msg, "không tồn tại"), // Token sai
+		strings.Contains(msg, "hết hạn"),       // Token cũ
+		strings.Contains(msg, "không hợp lệ"),  // Format sai
+		strings.Contains(msg, "bị block"),      // Bị admin chặn
+		strings.Contains(msg, "lỗi data"),      // Thiếu trường expired
+		strings.Contains(msg, "spreadsheetsid"): // Thiếu ID Sheet
+		return true // Đây là lỗi CHẾT
+	}
+	return false // Các lỗi khác (mạng, db...) cho phép thử lại
+}
+
+// isDateOnly: Kiểm tra xem chuỗi có phải chỉ chứa ngày không
+func isDateOnly(s string) bool {
+	hasSep := strings.Contains(s, "/") || strings.Contains(s, "-")
+	hasTime := strings.Contains(s, ":")
+	return hasSep && !hasTime // Có gạch ngày nhưng không có hai chấm giờ
+}
+
+// CheckGlobalRateLimit: Kiểm tra giới hạn tổng Server (Lớp 0)
 func CheckGlobalRateLimit() bool {
 	STATE.GlobalCounter.Mutex.Lock()
 	defer STATE.GlobalCounter.Mutex.Unlock()
 
 	now := time.Now().UnixMilli()
-	// Nếu đã qua cửa sổ thời gian cũ -> Reset về 0
+	// Reset nếu qua cửa sổ thời gian (1 giây)
 	if now-STATE.GlobalCounter.LastReset > TOKEN_RULES.WINDOW_MS {
 		STATE.GlobalCounter.LastReset = now
 		STATE.GlobalCounter.Count = 0
 	}
 	STATE.GlobalCounter.Count++
+	// Trả về True nếu chưa vượt quá giới hạn
 	return STATE.GlobalCounter.Count <= TOKEN_RULES.GLOBAL_MAX_REQ
 }
 
-// Kiểm tra User Rate Limit (Có Reset mỗi giây)
+// CheckUserRateLimit: Kiểm tra giới hạn từng User (Lớp 2)
 func CheckUserRateLimit(token string) bool {
 	STATE.RateMutex.Lock()
 	defer STATE.RateMutex.Unlock()
 
 	now := time.Now().UnixMilli()
 	rec, exists := STATE.RateLimit[token]
+	
 	// Nếu chưa có user này -> Tạo mới
 	if !exists {
 		rec = &RateLimitData{LastReset: now, Count: 0}
 		STATE.RateLimit[token] = rec
 	}
 
-	// Reset nếu qua giây
+	// Reset nếu qua cửa sổ thời gian
 	if now-rec.LastReset > TOKEN_RULES.WINDOW_MS {
 		rec.LastReset = now
 		rec.Count = 0
 	}
 	rec.Count++
+	// Trả về True nếu chưa spam
 	return rec.Count <= TOKEN_RULES.TOKEN_MAX_REQ
 }
 
-// Ghi dữ liệu vào Cache (Dùng chung cho cả Valid và Invalid token)
+// setCache: Hàm ghi dữ liệu vào Cache RAM an toàn (Thread-safe)
 func setCache(token string, data *TokenData, isInvalid bool, msg string, ttl int64) {
 	STATE.TokenMutex.Lock()
-	defer STATE.TokenMutex.Unlock()
+	defer STATE.TokenMutex.Unlock() // Đảm bảo luôn mở khóa khi xong việc
 	
 	cached := &CachedToken{
 		IsInvalid:  isInvalid,
@@ -375,9 +433,9 @@ func setCache(token string, data *TokenData, isInvalid bool, msg string, ttl int
 	STATE.TokenCache[token] = cached
 }
 
-// Xóa Token khỏi Cache
+// deleteTokenCache: Hàm xóa Cache an toàn
 func deleteTokenCache(token string) {
 	STATE.TokenMutex.Lock()
-	defer STATE.TokenMutex.Unlock()
+	defer STATE.TokenMutex.Unlock() // Đảm bảo luôn mở khóa
 	delete(STATE.TokenCache, token)
 }
