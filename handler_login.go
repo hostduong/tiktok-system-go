@@ -29,7 +29,7 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Check Auth
+	// 2. Check Auth [cite: 193-210]
 	auth := CheckToken(body.Token)
 	if !auth.IsValid {
 		json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": auth.Messenger})
@@ -38,12 +38,14 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 
 	sid := auth.SpreadsheetID
 	did := CleanString(body.DeviceID)
-	if did == "" {
+	
+	// Validate DeviceID
+	if did == "" && body.Type != "view" {
 		json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": "Thiếu deviceId"})
 		return
 	}
 
-	// 3. Chuẩn hóa Action
+	// 3. Chuẩn hóa Action [cite: 446-447]
 	action := CleanString(body.Action)
 	if body.Type == "view" {
 		action = "view_only"
@@ -67,7 +69,7 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. SEARCH LOGIC
+	// 5. SEARCH LOGIC [cite: 217-255]
 	targetIndex := -1
 	targetData := make([]interface{}, 0)
 	sysEmail := ""
@@ -78,7 +80,6 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 	isReadOnly := (action == "view_only")
 	
 	// --- A. TÌM KIẾM ĐÍCH DANH (SEARCH MODE) ---
-	// Kiểm tra xem có tham số tìm kiếm cụ thể không
 	sUID := CleanString(body.SearchUserID)
 	sSec := CleanString(body.SearchUserSec)
 	sName := CleanString(body.SearchUserName)
@@ -117,10 +118,8 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 			val := checkQuality(cleanRow, action)
 			if val.Valid {
 				targetIndex = idx
-				targetData = rawRow // Clone if needed
+				targetData = rawRow 
 				sysEmail = val.SystemEmail
-				
-				// Tìm các nick cần dọn dẹp
 				cleanupIndices = findCleanupIndices(cache, did, false, idx)
 			}
 		}
@@ -128,20 +127,18 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// --- B. TÌM KIẾM TỰ ĐỘNG (AUTO MODE) ---
-	// Chỉ chạy khi chưa tìm thấy ở bước A
 	if targetIndex == -1 && !isReadOnly {
-		// Định nghĩa các nhóm ưu tiên
+		// Định nghĩa các nhóm ưu tiên [cite: 232-235]
 		groups := definePriorityGroups(action, body.IsReset)
 		
 		for _, g := range groups {
-			if g.Priority >= priority { continue } // Tối ưu: Nếu đã có kèo ngon hơn thì bỏ qua
+			if g.Priority >= priority { continue }
 			
 			cache.Mutex.RLock()
 			candidateIndices := cache.StatusIndices[g.Status]
 			cache.Mutex.RUnlock()
 
 			for _, idx := range candidateIndices {
-				// Lấy snapshot row để check nhanh (Read Lock)
 				cache.Mutex.RLock()
 				if idx >= len(cache.CleanValues) { cache.Mutex.RUnlock(); continue }
 				cleanRow := cache.CleanValues[idx]
@@ -155,50 +152,37 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 					// Check chất lượng
 					val := checkQuality(cleanRow, g.Type)
 					if !val.Valid {
-						// Mark Error (Ghi chú ý) -> Đẩy Queue
+						// Mark Error -> Đẩy Queue [cite: 239-242]
 						markError(sid, idx, "Nick thiếu "+val.Missing)
 						continue
 					}
 
-					// 🔥 OPTIMISTIC LOCKING CORE 🔥
+					// 🔥 OPTIMISTIC LOCKING CORE [cite: 242-251]
 					if isMy {
-						// Case 1: Nick của mình -> Lấy luôn
-						targetIndex = idx
-						priority = g.Priority
-						responseType = g.Type
-						sysEmail = val.SystemEmail
+						targetIndex = idx; priority = g.Priority; responseType = g.Type; sysEmail = val.SystemEmail
 						cache.Mutex.RLock()
 						targetData = cache.RawValues[idx]
 						cache.Mutex.RUnlock()
-						break // Thoát vòng lặp candidate
+						break
 					} else if isNoDev {
-						// Case 2: Nick trống -> Cần chiếm quyền (Write Lock)
-						// Sử dụng Double-Checked Locking để không chặn toàn bộ hệ thống
-						
-						cache.Mutex.Lock() // BLOCKING HERE
-						// Kiểm tra lại lần nữa
+						cache.Mutex.Lock() // BLOCKING
 						if cache.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] == "" {
-							// OK, vẫn trống. Ghi đè!
 							cache.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = did
 							cache.RawValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = did
 							
-							targetIndex = idx
-							priority = g.Priority
-							responseType = g.Type
-							sysEmail = val.SystemEmail
+							targetIndex = idx; priority = g.Priority; responseType = g.Type; sysEmail = val.SystemEmail
 							targetData = cache.RawValues[idx]
 							
-							cache.Mutex.Unlock() // UNBLOCK
-							break // Success
+							cache.Mutex.Unlock()
+							break 
 						}
-						cache.Mutex.Unlock() // Bị người khác lấy mất -> Thử nick khác
+						cache.Mutex.Unlock()
 					}
 				}
 			}
-			if targetIndex != -1 { break } // Tìm thấy ở nhóm ưu tiên này rồi
+			if targetIndex != -1 { break }
 		}
 		
-		// Tìm dọn dẹp sau khi chốt nick
 		if targetIndex != -1 {
 			isResetCompleted := (priority == 5 || priority == 9)
 			cache.Mutex.RLock()
@@ -215,7 +199,7 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 
 	excelRow := RANGES.DATA_START_ROW + targetIndex
 	
-	// Build response profiles
+	// Build response profiles - Dùng hàm mapProfile ĐẦY ĐỦ [cite: 80-86]
 	authProfile := mapProfile(targetData, 0, 22)
 	activityProfile := mapProfile(targetData, 23, 44)
 	aiProfile := mapProfile(targetData, 45, 60)
@@ -229,7 +213,7 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	// Update Note & Status cho Nick chính
+	// Update Note & Status
 	newStatus := STATUS_WRITE.RUNNING
 	if responseType == "register" { newStatus = STATUS_WRITE.REGISTERING }
 	
@@ -247,15 +231,14 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 	if INDEX_DATA_TIKTOK.STATUS < CACHE.CLEAN_COL_LIMIT {
 		cache.CleanValues[targetIndex][INDEX_DATA_TIKTOK.STATUS] = CleanString(newStatus)
 	}
-	// Logic update status index map... (tối giản cho gọn, flush sẽ lo việc ghi đĩa)
 	cache.Mutex.Unlock()
 
 	// Đẩy vào Queue Update
 	rowToUpdate := make([]interface{}, len(cache.RawValues[targetIndex]))
-	copy(rowToUpdate, cache.RawValues[targetIndex]) // Deep copy
+	copy(rowToUpdate, cache.RawValues[targetIndex])
 	QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, targetIndex, rowToUpdate)
 
-	// Xử lý Cleanup (Các nick cũ)
+	// Xử lý Cleanup [cite: 281-286]
 	if len(cleanupIndices) > 0 {
 		cleanSt := STATUS_WRITE.WAITING
 		if responseType == "register" { cleanSt = STATUS_WRITE.WAIT_REG }
@@ -264,13 +247,10 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 			cache.Mutex.Lock()
 			cNote, _ := cache.RawValues[cIdx][INDEX_DATA_TIKTOK.NOTE].(string)
 			newCNote := ""
-			if isResetAction {
-				newCNote = CreateStandardNote(cNote, "Reset chờ chạy", "reset")
-			}
+			if isResetAction { newCNote = CreateStandardNote(cNote, "Reset chờ chạy", "reset") }
 			cache.RawValues[cIdx][INDEX_DATA_TIKTOK.STATUS] = cleanSt
 			cache.RawValues[cIdx][INDEX_DATA_TIKTOK.NOTE] = newCNote
 			
-			// Update clean values if needed
 			if INDEX_DATA_TIKTOK.STATUS < CACHE.CLEAN_COL_LIMIT {
 				cache.CleanValues[cIdx][INDEX_DATA_TIKTOK.STATUS] = CleanString(cleanSt)
 			}
@@ -308,18 +288,14 @@ func checkQuality(row []string, action string) QualityResult {
 		if hasEmail { return QualityResult{true, sysEmail, ""} }
 		return QualityResult{false, "", "email"}
 	}
-	// Login / Auto
 	if (hasEmail || hasUser) && hasPass { return QualityResult{true, sysEmail, ""} }
-	if action == "auto" && hasEmail { return QualityResult{true, sysEmail, ""} } // Auto du di hơn
-	
+	if action == "auto" && hasEmail { return QualityResult{true, sysEmail, ""} }
 	return QualityResult{false, "", "user/pass"}
 }
 
 type PriorityGroup struct { Status string; Type string; Priority int; My bool }
 
 func definePriorityGroups(action string, isReset bool) []PriorityGroup {
-	// Map từ string status cũ sang key map
-	// Chú ý: Key trong map Indices là lowercase đã clean
 	r, w, l, reg, wreg, c := STATUS_READ.RUNNING, STATUS_READ.WAITING, STATUS_READ.LOGIN, STATUS_READ.REGISTER, STATUS_READ.WAIT_REG, STATUS_READ.COMPLETED
 	registering := STATUS_READ.REGISTERING
 
@@ -335,7 +311,6 @@ func definePriorityGroups(action string, isReset bool) []PriorityGroup {
 			{registering, "register", 1, true}, {wreg, "register", 2, true}, {reg, "register", 3, true}, {reg, "register", 4, false},
 		}
 	}
-	// Auto
 	list := []PriorityGroup{
 		{r, "login", 1, true}, {w, "login", 2, true}, {l, "login", 3, true}, {l, "login", 4, false},
 		{registering, "register", 5, true}, {wreg, "register", 6, true}, {reg, "register", 7, true}, {reg, "register", 8, false},
@@ -364,34 +339,93 @@ func findCleanupIndices(cache *SheetCacheData, did string, isResetCompleted bool
 }
 
 func markError(sid string, idx int, msg string) {
-	// Hàm phụ ghi log lỗi nhanh
 	note := msg + "\n" + GetTimeVN()
 	QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, idx, []interface{}{STATUS_WRITE.ATTENTION, note})
 }
 
-// Map dữ liệu mảng sang JSON object theo config Key
+// mapProfile: Ánh xạ 100% dữ liệu từ Array sang Map (giống logic Node.js anh_xa_...)
+// [cite: 79-86] Node.js duyệt qua keys và lowercase chúng. Ở đây ta hardcode mapping để đảm bảo performance và chính xác
 func mapProfile(row []interface{}, start int, end int) map[string]string {
 	res := make(map[string]string)
-	// Iterate through keys of INDEX_DATA_TIKTOK (cần reverse map để lấy tên key từ index value)
-	// Để tối ưu, ta hardcode logic mapping dựa trên struct INDEX_DATA_TIKTOK hoặc duyệt qua nó
-	// Trong thực tế nên tạo 1 map ngược int->string lúc init. Ở đây ta làm thủ công các cột quan trọng
-	// Hoặc đơn giản hóa:
-	// Cách tốt nhất: Duyệt qua field của struct INDEX_DATA_TIKTOK (Reflection) hoặc Map thủ công
-	// Do Golang static, ta dùng Map thủ công trong init là tốt nhất.
-	// Ở đây tôi giả lập logic:
 	
-	// Mapping nhanh (Demo logic, bạn có thể fill full)
-	cols := map[string]int{
-		"email":6, "password":8, "user_id":3, //... fill all keys from config
+	getVal := func(idx int) string {
+		if idx < len(row) { return CleanString(row[idx]) }
+		return ""
 	}
-	// Logic Node.js: INDEX_DATA_TIKTOK_KEYS
-	// Ta sẽ trả về empty map nếu lười, nhưng để đúng "100% logic", ta cần map đúng.
-	// (Đã implement chi tiết trong config.go nhưng struct ko iter được, nên dùng map phụ này)
-	
-	// Tạm thời trả về map rỗng để code chạy, bạn cần điền key mapping vào đây nếu client cần
-	// Hoặc dùng JSON Marshal full row nếu client tự parse
-	
-	// *FIX*: Để đúng 100%, tôi viết helper map ở đây:
-	// (Cần bổ sung map ngược vào config.go nếu muốn sạch, nhưng viết inline ở đây cũng được)
-	return res 
+
+	// 1. AUTH PROFILE (0-22)
+	if start == 0 {
+		res["status"] = getVal(INDEX_DATA_TIKTOK.STATUS)
+		res["note"] = getVal(INDEX_DATA_TIKTOK.NOTE)
+		res["device_id"] = getVal(INDEX_DATA_TIKTOK.DEVICE_ID)
+		res["user_id"] = getVal(INDEX_DATA_TIKTOK.USER_ID)
+		res["user_sec"] = getVal(INDEX_DATA_TIKTOK.USER_SEC)
+		res["user_name"] = getVal(INDEX_DATA_TIKTOK.USER_NAME)
+		res["email"] = getVal(INDEX_DATA_TIKTOK.EMAIL)
+		res["nick_name"] = getVal(INDEX_DATA_TIKTOK.NICK_NAME)
+		res["password"] = getVal(INDEX_DATA_TIKTOK.PASSWORD)
+		res["password_email"] = getVal(INDEX_DATA_TIKTOK.PASSWORD_EMAIL)
+		res["recovery_email"] = getVal(INDEX_DATA_TIKTOK.RECOVERY_EMAIL)
+		res["two_fa"] = getVal(INDEX_DATA_TIKTOK.TWO_FA)
+		res["phone"] = getVal(INDEX_DATA_TIKTOK.PHONE)
+		res["birthday"] = getVal(INDEX_DATA_TIKTOK.BIRTHDAY)
+		res["client_id"] = getVal(INDEX_DATA_TIKTOK.CLIENT_ID)
+		res["refresh_token"] = getVal(INDEX_DATA_TIKTOK.REFRESH_TOKEN)
+		res["access_token"] = getVal(INDEX_DATA_TIKTOK.ACCESS_TOKEN)
+		res["cookie"] = getVal(INDEX_DATA_TIKTOK.COOKIE)
+		res["user_agent"] = getVal(INDEX_DATA_TIKTOK.USER_AGENT)
+		res["proxy"] = getVal(INDEX_DATA_TIKTOK.PROXY)
+		res["proxy_expired"] = getVal(INDEX_DATA_TIKTOK.PROXY_EXPIRED)
+		res["create_country"] = getVal(INDEX_DATA_TIKTOK.CREATE_COUNTRY)
+		res["create_time"] = getVal(INDEX_DATA_TIKTOK.CREATE_TIME)
+	}
+
+	// 2. ACTIVITY PROFILE (23-44)
+	if start == 23 {
+		res["status_post"] = getVal(INDEX_DATA_TIKTOK.STATUS_POST)
+		res["daily_post_limit"] = getVal(INDEX_DATA_TIKTOK.DAILY_POST_LIMIT)
+		res["today_post_count"] = getVal(INDEX_DATA_TIKTOK.TODAY_POST_COUNT)
+		res["daily_follow_limit"] = getVal(INDEX_DATA_TIKTOK.DAILY_FOLLOW_LIMIT)
+		res["today_follow_count"] = getVal(INDEX_DATA_TIKTOK.TODAY_FOLLOW_COUNT)
+		res["last_active_date"] = getVal(INDEX_DATA_TIKTOK.LAST_ACTIVE_DATE)
+		res["follower_count"] = getVal(INDEX_DATA_TIKTOK.FOLLOWER_COUNT)
+		res["following_count"] = getVal(INDEX_DATA_TIKTOK.FOLLOWING_COUNT)
+		res["likes_count"] = getVal(INDEX_DATA_TIKTOK.LIKES_COUNT)
+		res["video_count"] = getVal(INDEX_DATA_TIKTOK.VIDEO_COUNT)
+		res["status_live"] = getVal(INDEX_DATA_TIKTOK.STATUS_LIVE)
+		// Các trường mới trong V243
+		res["live_phone_access"] = getVal(INDEX_DATA_TIKTOK.LIVE_PHONE_ACCESS)
+		res["live_studio_access"] = getVal(INDEX_DATA_TIKTOK.LIVE_STUDIO_ACCESS)
+		res["live_key"] = getVal(INDEX_DATA_TIKTOK.LIVE_KEY)
+		res["last_live_duration"] = getVal(INDEX_DATA_TIKTOK.LAST_LIVE_DURATION)
+		res["shop_role"] = getVal(INDEX_DATA_TIKTOK.SHOP_ROLE)
+		res["shop_id"] = getVal(INDEX_DATA_TIKTOK.SHOP_ID)
+		res["product_count"] = getVal(INDEX_DATA_TIKTOK.PRODUCT_COUNT)
+		res["shop_health"] = getVal(INDEX_DATA_TIKTOK.SHOP_HEALTH)
+		res["total_orders"] = getVal(INDEX_DATA_TIKTOK.TOTAL_ORDERS)
+		res["total_revenue"] = getVal(INDEX_DATA_TIKTOK.TOTAL_REVENUE)
+		res["commission_rate"] = getVal(INDEX_DATA_TIKTOK.COMMISSION_RATE)
+	}
+
+	// 3. AI PROFILE (45-60)
+	if start == 45 {
+		res["signature"] = getVal(INDEX_DATA_TIKTOK.SIGNATURE)
+		res["default_category"] = getVal(INDEX_DATA_TIKTOK.DEFAULT_CATEGORY)
+		res["default_product"] = getVal(INDEX_DATA_TIKTOK.DEFAULT_PRODUCT)
+		res["preferred_keywords"] = getVal(INDEX_DATA_TIKTOK.PREFERRED_KEYWORDS)
+		res["preferred_hashtags"] = getVal(INDEX_DATA_TIKTOK.PREFERRED_HASHTAGS)
+		res["writing_style"] = getVal(INDEX_DATA_TIKTOK.WRITING_STYLE)
+		res["main_goal"] = getVal(INDEX_DATA_TIKTOK.MAIN_GOAL)
+		res["default_cta"] = getVal(INDEX_DATA_TIKTOK.DEFAULT_CTA)
+		res["content_length"] = getVal(INDEX_DATA_TIKTOK.CONTENT_LENGTH)
+		res["content_type"] = getVal(INDEX_DATA_TIKTOK.CONTENT_TYPE)
+		res["target_audience"] = getVal(INDEX_DATA_TIKTOK.TARGET_AUDIENCE)
+		res["visual_style"] = getVal(INDEX_DATA_TIKTOK.VISUAL_STYLE)
+		res["ai_persona"] = getVal(INDEX_DATA_TIKTOK.AI_PERSONA)
+		res["banned_keywords"] = getVal(INDEX_DATA_TIKTOK.BANNED_KEYWORDS)
+		res["content_language"] = getVal(INDEX_DATA_TIKTOK.CONTENT_LANGUAGE)
+		res["country"] = getVal(INDEX_DATA_TIKTOK.COUNTRY)
+	}
+
+	return res
 }
