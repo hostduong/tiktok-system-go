@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings" // 🔥 Import strings để dùng TrimSpace
 	"time"
 
 	firebase "firebase.google.com/go/v4"
@@ -77,7 +78,11 @@ func AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		tokenStr := CleanString(bodyMap["token"])
+		// 🔥 FIX QUAN TRỌNG: Chỉ Trim khoảng trắng, KHÔNG đổi sang chữ thường
+		// tokenStr := CleanString(bodyMap["token"]) <--- CŨ (SAI vì làm mất chữ hoa)
+		
+		tokenRaw, _ := bodyMap["token"].(string)
+		tokenStr := strings.TrimSpace(tokenRaw) // <--- MỚI (Giữ nguyên hoa thường)
 		
 		authRes := CheckToken(tokenStr)
 		if !authRes.IsValid {
@@ -96,81 +101,53 @@ func AuthMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// CheckToken: Logic kiểm tra Token (Giống hệt Node.js V243 dòng 279)
+// CheckToken: Logic kiểm tra Token
 func CheckToken(token string) AuthResult {
+	// Debug log xem Token nhận vào là gì
+	log.Printf("🔍 [DEBUG] Check Token: %s", token)
+
 	if firebaseDB == nil {
 		return AuthResult{IsValid: false, Messenger: "Database chưa sẵn sàng"}
 	}
 
-	// Node.js dòng 273: Kiểm tra định dạng token
-	if token == "" || len(token) < 50 {
+	if token == "" || len(token) < 10 {
 		return AuthResult{IsValid: false, Messenger: "Token không hợp lệ"}
 	}
 
-	// Node.js dòng 278: db.ref(...).once('value')
+	var data map[string]interface{}
 	ref := firebaseDB.NewRef("TOKEN_TIKTOK/" + token)
 	
-	// Thay vì Get trực tiếp vào Map, ta lấy DataSnapshot để chắc chắn tồn tại
-	// (Đây là cách debug xem thực sự Firebase trả về gì)
-	var data map[string]interface{}
 	if err := ref.Get(context.Background(), &data); err != nil {
-		log.Printf("❌ [FIREBASE ERROR] Token: %s | Err: %v", token, err)
+		log.Printf("❌ [FIREBASE ERROR] %v", err)
 		return AuthResult{IsValid: false, Messenger: "Lỗi kết nối Database"}
 	}
 
-	// Node.js dòng 279: if (!snap.exists())
 	if data == nil {
 		log.Printf("⚠️ [FIREBASE] Token not found: %s", token)
 		return AuthResult{IsValid: false, Messenger: "Token không tồn tại"}
 	}
 
-	// Node.js dòng 283: if (!data.expired)
-	if data["expired"] == nil {
-		log.Printf("⚠️ [FIREBASE] Token missing 'expired': %s", token)
+	if data["expired"] == nil || data["spreadsheetId"] == nil {
 		return AuthResult{IsValid: false, Messenger: "Token lỗi data"}
 	}
 
-	// Node.js dòng 285: Utils.chuyen_doi_thoi_gian
 	expStr := fmt.Sprintf("%v", data["expired"])
 	expTime := parseExpirationTime(expStr)
 	
-	// Node.js dòng 286: if (now > exp)
 	if time.Now().After(expTime) {
-		log.Printf("⚠️ [FIREBASE] Token expired: %s (Exp: %v)", token, expTime)
+		log.Printf("⚠️ [FIREBASE] Token expired: %s", token)
 		return AuthResult{IsValid: false, Messenger: "Token hết hạn"}
 	}
 
-	// Lấy SpreadsheetID
-	sid := ""
-	if data["spreadsheetId"] != nil {
-		sid = fmt.Sprintf("%v", data["spreadsheetId"])
-	}
-	
-	if sid == "" {
-		return AuthResult{IsValid: false, Messenger: "Token lỗi data (Thiếu spreadsheetId)"}
-	}
-
+	sid := fmt.Sprintf("%v", data["spreadsheetId"])
 	return AuthResult{IsValid: true, SpreadsheetID: sid, Data: data}
 }
 
-// Hàm parse ngày tháng (Khớp logic Utils.chuyen_doi_thoi_gian dòng 136 Node.js)
 func parseExpirationTime(dateStr string) time.Time {
-	// Node.js logic: dd/mm/yyyy hh:mm:ss
-	layout := "02/01/2006 15:04:05" // Định dạng chuẩn Go
+	layout := "02/01/2006"
 	t, err := time.Parse(layout, dateStr)
 	if err != nil {
-		// Thử định dạng ngắn gọn dd/mm/yyyy
-		layoutShort := "02/01/2006"
-		tShort, errShort := time.Parse(layoutShort, dateStr)
-		if errShort == nil {
-			// Nếu chỉ có ngày, hạn là cuối ngày đó (23:59:59)
-			return tShort.Add(23*time.Hour + 59*time.Minute + 59*time.Second)
-		}
-		// Fallback: Node.js trả về 0 nếu lỗi, ở đây ta cho hết hạn luôn để an toàn
-		// Hoặc cho sống tạm 1 ngày để debug (như bản cũ)
-		// Logic chuẩn: Fail safe -> Coi như hợp lệ để tránh chặn nhầm (như Node.js logic mềm dẻo)
-		log.Printf("⚠️ [TIME PARSE ERROR] %s", dateStr)
-		return time.Now().Add(24 * time.Hour) 
+		return time.Now().Add(24 * time.Hour)
 	}
-	return t
+	return t.Add(23*time.Hour + 59*time.Minute)
 }
