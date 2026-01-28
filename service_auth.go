@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -26,23 +25,19 @@ var AuthInitError error
 // =================================================================================================
 
 var TOKEN_RULES = struct {
-	// Rate Limit
 	GLOBAL_MAX_REQ int   // Max request toàn server / giây
 	TOKEN_MAX_REQ  int   // Max request mỗi token / giây
 	WINDOW_MS      int64 // Cửa sổ thời gian (ms)
-
-	// Token Config
-	MIN_LENGTH   int            // Độ dài tối thiểu
-	CACHE_TTL_MS int64          // Thời gian cache token đúng (60 phút)
-	BLOCK_TTL_MS int64          // Thời gian block token sai (1 phút)
+	MIN_LENGTH     int   // Độ dài tối thiểu
+	CACHE_TTL_MS   int64 // Thời gian cache mặc định (1 giờ)
+	BLOCK_TTL_MS   int64 // Thời gian block token sai (1 phút)
 }{
 	GLOBAL_MAX_REQ: 1000,
 	TOKEN_MAX_REQ:  5,
 	WINDOW_MS:      1000,
-
-	MIN_LENGTH:   10,
-	CACHE_TTL_MS: 3600000, // 1 giờ
-	BLOCK_TTL_MS: 60000,   // 60 giây
+	MIN_LENGTH:     10,
+	CACHE_TTL_MS:   3600000, // 60 phút
+	BLOCK_TTL_MS:   60000,   // 60 giây
 }
 
 // =================================================================================================
@@ -78,12 +73,12 @@ func InitAuthService(credJSON []byte) {
 	}
 
 	firebaseDB = client
-	fmt.Println("✅ Firebase Service initialized (V4) - Smart Time Edition.")
+	fmt.Println("✅ Firebase Service initialized (V4) - Secure Edition.")
 }
 
 func AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// [LỚP 0] Global Rate Limit
+		// [LỚP 0] Global Rate Limit (Hard Limit)
 		if !CheckGlobalRateLimit() {
 			http.Error(w, `{"status":"false","messenger":"Server Busy (Global Limit)"}`, 503)
 			return
@@ -94,7 +89,6 @@ func AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Đọc Body an toàn
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, `{"status":"false","messenger":"Read Body Error"}`, 400)
@@ -108,7 +102,6 @@ func AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Lấy Token (Giữ nguyên hoa thường để khớp Firebase)
 		tokenRaw, _ := bodyMap["token"].(string)
 		tokenStr := strings.TrimSpace(tokenRaw)
 		
@@ -120,7 +113,7 @@ func AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// [LỚP 2] User Rate Limit
+		// [LỚP 2] User Rate Limit (Soft Limit)
 		if !CheckUserRateLimit(tokenStr) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(429)
@@ -139,55 +132,50 @@ func AuthMiddleware(next http.Handler) http.Handler {
 }
 
 // =================================================================================================
-// 🛡️ PHẦN 2: LOGIC CHECK TOKEN & TIME PARSER (THÔNG MINH)
+// 🛡️ PHẦN 2: LOGIC CHECK TOKEN & TIME PARSER (OPTIMIZED)
 // =================================================================================================
 
 func CheckToken(token string) AuthResult {
-	// 1. Validate sơ bộ
 	if token == "" || len(token) < TOKEN_RULES.MIN_LENGTH {
-		return AuthResult{IsValid: false, Messenger: "Token không hợp lệ (Quá ngắn)"}
+		return AuthResult{IsValid: false, Messenger: "Token không hợp lệ"}
 	}
 
 	now := time.Now().UnixMilli()
 
-	// 2. Kiểm tra Cache RAM (Lớp 1)
+	// 1. Kiểm tra Cache RAM
 	STATE.TokenMutex.RLock()
 	cached, exists := STATE.TokenCache[token]
 	STATE.TokenMutex.RUnlock()
 
 	if exists {
-		// Nếu là Cache chặn (Negative Cache)
+		// Cache chặn (Negative Cache)
 		if cached.IsInvalid {
 			if now < cached.ExpiryTime {
 				return AuthResult{IsValid: false, Messenger: cached.Msg}
 			}
-			// Hết thời gian phạt -> Xóa cache để check lại
-			deleteTokenCache(token)
+			deleteTokenCache(token) // Hết hạn block -> Xóa để check lại
 		} else {
-			// Token hợp lệ
+			// Cache hợp lệ (Positive Cache)
 			if now < cached.ExpiryTime {
 				return AuthResult{IsValid: true, SpreadsheetID: cached.Data.SpreadsheetID, Data: cached.Data.Data}
 			}
-			// Hết hạn cache -> Check lại Firebase cập nhật mới
-			deleteTokenCache(token)
+			deleteTokenCache(token) // Hết hạn cache -> Xóa để refresh
 		}
 	}
 
-	// 3. Kiểm tra Firebase (Lớp 2)
+	// 2. Kiểm tra Firebase
 	if firebaseDB == nil {
 		return AuthResult{IsValid: false, Messenger: "Database chưa sẵn sàng"}
 	}
 
-	// Dùng DataSnapshot (once value) để chắc chắn
 	ref := firebaseDB.NewRef("TOKEN_TIKTOK/" + token)
 	var data map[string]interface{}
-	
 	if err := ref.Get(context.Background(), &data); err != nil {
 		log.Printf("❌ [FIREBASE ERROR] %v", err)
 		return AuthResult{IsValid: false, Messenger: "Lỗi kết nối Database"}
 	}
 
-	// Cache chặn (Negative Cache) nếu không tìm thấy
+	// Xử lý Negative Cache (Chặn spam token rác)
 	if data == nil {
 		setCache(token, nil, true, "Token không tồn tại", TOKEN_RULES.BLOCK_TTL_MS)
 		return AuthResult{IsValid: false, Messenger: "Token không tồn tại"}
@@ -198,27 +186,27 @@ func CheckToken(token string) AuthResult {
 		return AuthResult{IsValid: false, Messenger: "Token lỗi data"}
 	}
 
-	// 4. Kiểm tra Hạn sử dụng (Smart Parse Logic)
+	// 3. Kiểm tra Hạn sử dụng (Smart Time)
 	expStr := fmt.Sprintf("%v", data["expired"])
-	expTime := parseSmartTime(expStr) // 🔥 Gọi hàm thông minh mới
+	expTime := parseSmartTime(expStr)
 	
-	// Nếu parse thất bại (time.Zero) hoặc đã qua giờ G
-	if expTime.IsZero() || time.Now().After(expTime) {
-		log.Printf("⚠️ Token Expired/Invalid Time: %s (Raw: %s, Parsed: %v)", token, expStr, expTime)
+	timeLeft := expTime.Sub(time.Now()).Milliseconds()
+
+	// Nếu parse lỗi (time.Zero) hoặc đã hết hạn
+	if expTime.IsZero() || timeLeft <= 0 {
 		setCache(token, nil, true, "Token hết hạn", TOKEN_RULES.BLOCK_TTL_MS)
 		return AuthResult{IsValid: false, Messenger: "Token hết hạn"}
 	}
 
-	// 5. Cache thành công (Positive Cache)
+	// 4. Cache thành công (Positive Cache) - Logic TTL chuẩn bảo mật
 	sid := fmt.Sprintf("%v", data["spreadsheetId"])
 	
-	// Tính TTL: Max là CACHE_TTL_MS, hoặc thời gian còn lại của Token
+	// TTL = Min(Cấu hình, Thời gian sống còn lại)
+	// Tránh trường hợp token còn 10s nhưng cache lưu 60s -> Zombie Token
 	ttl := TOKEN_RULES.CACHE_TTL_MS
-	timeLeft := expTime.Sub(time.Now()).Milliseconds()
-	if timeLeft < ttl {
+	if ttl > timeLeft {
 		ttl = timeLeft
 	}
-	if ttl < 60000 { ttl = 60000 } // Tối thiểu 1 phút
 
 	validData := TokenData{
 		Token:         token,
@@ -231,33 +219,43 @@ func CheckToken(token string) AuthResult {
 	return AuthResult{IsValid: true, SpreadsheetID: sid, Data: data}
 }
 
-// 🔥 HÀM PARSE THỜI GIAN THÔNG MINH (THEO ĐỀ XUẤT CỦA BẠN)
+// 🔥 PARSE TIME THÔNG MINH (UPDATED)
 func parseSmartTime(dateStr string) time.Time {
 	vnZone := time.FixedZone("UTC+7", 7*3600)
 	s := strings.TrimSpace(dateStr)
 
-	// 1️⃣ Numeric timestamp (s / ms)
-	// Cho phép kiểu số nguyên hoặc chuỗi số
+	// 1️⃣ Numeric Check (Ưu tiên số 1 để tránh nhầm date string)
 	if ts, err := strconv.ParseInt(s, 10, 64); err == nil {
-		if ts > 1e11 { // milliseconds (13 digits)
+		// Ngưỡng 1e11 (100 tỷ):
+		// - Seconds: 100 tỷ giây ~ Năm 5138 (Quá xa -> Chắc chắn không phải giây hiện tại)
+		// - Millis:  100 tỷ ms   ~ Năm 1973 (Hợp lý cho timestamp cũ, nhưng thường timestamp hiện tại > 1.7e12)
+		// => Nếu > 1e11 thì chắc chắn là Milliseconds.
+		if ts > 100000000000 { 
 			return time.UnixMilli(ts).In(vnZone)
 		}
-		// seconds (10 digits)
 		return time.Unix(ts, 0).In(vnZone)
 	}
 
-	// 2️⃣ ISO-8601 (RFC3339) - Ưu tiên chuẩn quốc tế
+	// 2️⃣ ISO-8601 / RFC3339 (Chuẩn quốc tế)
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t.In(vnZone)
 	}
+	// Fallback: ISO thiếu Timezone (vd: 2026-01-29T06:03:55) -> Gán VN Zone
+	if t, err := time.ParseInLocation("2006-01-02T15:04:05", s, vnZone); err == nil {
+		return t
+	}
 
-	// 3️⃣ Date-only → Cuối ngày
-	// Logic đơn giản: Nếu độ dài <= 10 (vd: 29/01/2026), tự động thêm giờ cuối ngày
-	if len(s) <= 10 && !strings.Contains(s, ":") {
+	// 3️⃣ Date-Only Logic (An toàn hơn)
+	// Chỉ cộng giờ nếu có dấu phân cách (- hoặc /) VÀ KHÔNG có giờ (:)
+	// Tránh trường hợp chuỗi rác hoặc format lạ
+	hasSep := strings.Contains(s, "/") || strings.Contains(s, "-")
+	hasTime := strings.Contains(s, ":")
+	
+	if hasSep && !hasTime {
 		s += " 23:59:59"
 	}
 
-	// 4️⃣ Custom VN Formats (Có giờ)
+	// 4️⃣ Custom VN Formats
 	layouts := []string{
 		"02/01/2006 15:04:05", // dd/MM/yyyy HH:mm:ss
 		"02-01-2006 15:04:05", // dd-MM-yyyy HH:mm:ss
@@ -265,18 +263,17 @@ func parseSmartTime(dateStr string) time.Time {
 	}
 
 	for _, layout := range layouts {
-		// ParseInLocation để ép hiểu là giờ VN (+7)
 		if t, err := time.ParseInLocation(layout, s, vnZone); err == nil {
 			return t
 		}
 	}
 
-	// 5️⃣ Fail closed -> Trả về time.Zero (IsZero() == true)
+	// 5️⃣ Fail -> Hết hạn (Time Zero)
 	return time.Time{}
 }
 
 // =================================================================================================
-// ⚙️ PHẦN 3: RATE LIMIT & CACHE HELPERS
+// ⚙️ HELPER FUNCTIONS
 // =================================================================================================
 
 func CheckGlobalRateLimit() bool {
@@ -313,7 +310,7 @@ func CheckUserRateLimit(token string) bool {
 
 func setCache(token string, data *TokenData, isInvalid bool, msg string, ttl int64) {
 	STATE.TokenMutex.Lock()
-	defer STATE.TokenMutex.Unlock()
+	defer STATE.TokenMutex.Unlock() // ✅ Defer chuẩn style Go
 	
 	cached := &CachedToken{
 		IsInvalid:  isInvalid,
@@ -328,6 +325,6 @@ func setCache(token string, data *TokenData, isInvalid bool, msg string, ttl int
 
 func deleteTokenCache(token string) {
 	STATE.TokenMutex.Lock()
+	defer STATE.TokenMutex.Unlock() // ✅ Defer chuẩn style Go
 	delete(STATE.TokenCache, token)
-	STATE.TokenMutex.Unlock()
 }
