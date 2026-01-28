@@ -2,10 +2,6 @@ package main
 
 import "regexp"
 
-// =================================================================================================
-// 🟢 PHẦN 3: HẰNG SỐ & CẤU HÌNH (CONSTANTS) - Port từ Node.js V243
-// =================================================================================================
-
 const (
 	SPREADSHEET_ID_MASTER = "1r71kCCd9plRqXIWKQ2-GMUp-UXH21ISmBOObbQxMZVs"
 	KEY_SEPARATOR         = "__"
@@ -66,7 +62,6 @@ var CACHE = struct {
 	TOKEN_MAX_KEYS:  5000,
 	MAIL_CACHE_TTL:  10000,   
 	TOKEN_TTL_MS:    3600000, 
-	// 🔥 FIX QUAN TRỌNG: Tăng lên 61 để cache đủ Password (cột 8) và các cột khác
 	CLEAN_COL_LIMIT: 61,       
 }
 
@@ -76,24 +71,6 @@ var QUEUE = struct {
 }{
 	FLUSH_INTERVAL_MS: 3000, 
 	BATCH_LIMIT_BASE:  500,
-}
-
-var RATE = struct {
-	WINDOW_MS      int64
-	GLOBAL_MAX_REQ int
-	TOKEN_MAX_REQ  int
-	MAX_ERROR      int
-	BAN_MS         int64
-	CLEANUP_MS     int64
-	ERROR_DEDUP_MS int64
-}{
-	WINDOW_MS:      1000,   
-	GLOBAL_MAX_REQ: 1000,   
-	TOKEN_MAX_REQ:  5,      
-	MAX_ERROR:      10,
-	BAN_MS:         300000, 
-	CLEANUP_MS:     600000, 
-	ERROR_DEDUP_MS: 5000,
 }
 
 var INDEX_DATA_TIKTOK = struct {
@@ -161,5 +138,4 @@ var STATUS_WRITE = struct {
 var (
 	REGEX_DATE  = regexp.MustCompile(`(\d{1,2}\/\d{1,2}\/\d{4})`)
 	REGEX_COUNT = regexp.MustCompile(`\(Lần\s*(\d+)\)`)
-	REGEX_TOKEN = regexp.MustCompile(`^[a-zA-Z0-9]{50,200}$`)
 )
