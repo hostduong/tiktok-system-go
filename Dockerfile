@@ -11,10 +11,16 @@ WORKDIR /app
 # Copy toàn bộ mã nguồn
 COPY . .
 
-# 🔥 UPDATE: Tải thư viện Firebase v4 (Bản mới nhất hỗ trợ Asia)
-RUN go get firebase.google.com/go/v4
+# 🔥 QUAN TRỌNG: Xóa file quản lý cũ để tránh bị kẹt version cũ
+RUN rm -f go.mod go.sum
 
-# Dọn dẹp và tải các thư viện khác
+# Khởi tạo lại module mới
+RUN go mod init github.com/hostduong/tiktok-system-go
+
+# Ép tải Firebase bản V4 (Bản mới nhất hỗ trợ Asia)
+RUN go get firebase.google.com/go/v4@latest
+
+# Tải các thư viện phụ thuộc khác
 RUN go mod tidy
 RUN go mod download
 
