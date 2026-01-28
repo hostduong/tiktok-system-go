@@ -6,9 +6,8 @@ import (
 	"strings"
 )
 
-// Chỉ giữ lại 2 hàm này vì các hàm Log/Mail/Search đã có file riêng
-
 // --- Handler Tạo Sheet (Stub hoạt động) ---
+// Giữ nguyên để tool không lỗi, sau này có thể thêm logic tạo sheet thật bằng Google API
 func HandleCreateSheets(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "true", "messenger": "Sheets setup completed (Stub)"})
 }
@@ -22,17 +21,25 @@ func HandleClearCache(w http.ResponseWriter, r *http.Request) {
 	}
 	sid := tokenData.SpreadsheetID
 
-	// Xả Queue
+	// 1. Ép ghi toàn bộ dữ liệu đang chờ trong Queue xuống Google Sheet
 	FlushQueue(sid, true)
 	
-	// Xóa Cache RAM
+	// 2. Xóa Cache RAM liên quan đến SpreadsheetID này
 	STATE.SheetMutex.Lock()
+	defer STATE.SheetMutex.Unlock()
+	
+	prefix := sid + KEY_SEPARATOR
+	count := 0
 	for k := range STATE.SheetCache {
-		if strings.HasPrefix(k, sid+KEY_SEPARATOR) {
+		if strings.HasPrefix(k, prefix) {
 			delete(STATE.SheetCache, k)
+			count++
 		}
 	}
-	STATE.SheetMutex.Unlock()
 
-	json.NewEncoder(w).Encode(map[string]string{"status": "true", "messenger": "Cache cleared & Data flushed"})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "true", 
+		"messenger": "Đã xóa cache và đồng bộ dữ liệu",
+		"deleted_keys": count,
+	})
 }
