@@ -4,37 +4,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"reflect"
 	"strings"
 	"time"
 )
 
+// Dùng Struct định nghĩa sẵn trong utils.go
 type LoginResponse struct {
-	Status          string            `json:"status"`
-	Type            string            `json:"type"`
-	Messenger       string            `json:"messenger"`
-	DeviceId        string            `json:"deviceId"`
-	RowIndex        int               `json:"row_index"`
-	SystemEmail     string            `json:"system_email"`
-	AuthProfile     map[string]string `json:"auth_profile"`
-	ActivityProfile map[string]string `json:"activity_profile"`
-	AiProfile       map[string]string `json:"ai_profile"`
+	Status          string          `json:"status"`
+	Type            string          `json:"type"`
+	Messenger       string          `json:"messenger"`
+	DeviceId        string          `json:"deviceId"`
+	RowIndex        int             `json:"row_index"`
+	SystemEmail     string          `json:"system_email"`
+	AuthProfile     AuthProfile     `json:"auth_profile"`     // 🔥 Dùng Struct
+	ActivityProfile ActivityProfile `json:"activity_profile"` // 🔥 Dùng Struct
+	AiProfile       AiProfile       `json:"ai_profile"`       // 🔥 Dùng Struct
 }
 
-var INDEX_TO_KEY map[int]string
-
-func init() {
-	INDEX_TO_KEY = make(map[int]string)
-	val := reflect.ValueOf(INDEX_DATA_TIKTOK)
-	typ := val.Type()
-	for i := 0; i < val.NumField(); i++ {
-		keyName := strings.ToLower(typ.Field(i).Name)
-		idx := int(val.Field(i).Int())
-		INDEX_TO_KEY[idx] = keyName
-	}
-}
-
-// 🔥 Đổi tên hàm thành HandleAccountAction để khớp với main.go của bạn
 func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 	var body map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -48,7 +34,6 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 🔥 FIX: SpreadsheetID viết hoa chữ D
 	spreadsheetId := tokenData.SpreadsheetID
 	deviceId := CleanString(body["deviceId"])
 	reqType := CleanString(body["type"])
@@ -58,9 +43,7 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 		action = "view_only"
 	} else if reqType == "auto" {
 		action = "auto"
-		if CleanString(body["action"]) == "reset" {
-			body["is_reset"] = true
-		}
+		if CleanString(body["action"]) == "reset" { body["is_reset"] = true }
 	} else if reqType == "register" {
 		action = "register"
 	} else if CleanString(body["action"]) == "reset" {
@@ -88,8 +71,6 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	targetData := make([]interface{}, 61)
 	responseType := "login"
 	sysEmail := ""
-	var cleanupIndices []int
-	var badIndices []map[string]interface{}
 
 	reqRowIndex := -1
 	if v, ok := body["row_index"].(float64); ok { reqRowIndex = int(v) }
@@ -135,9 +116,6 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 
 	QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, targetIndex, newRow)
 
-	if len(cleanupIndices) > 0 {}
-	if len(badIndices) > 0 {}
-
 	msg := "Lấy nick đăng nhập thành công"
 	if responseType == "register" { msg = "Lấy nick đăng ký thành công" }
 
@@ -148,7 +126,6 @@ type SearchResult struct {
 	TargetIndex  int
 	ResponseType string
 	SystemEmail  string
-	BadIndices   []map[string]interface{}
 }
 
 func simpleSearch(cache *SheetCacheData, action, devId string) SearchResult {
@@ -158,6 +135,7 @@ func simpleSearch(cache *SheetCacheData, action, devId string) SearchResult {
 		isMy := (curDev == devId)
 		isEmpty := (curDev == "")
 		isLoginSt := (st == "đang chạy" || st == "đang chờ" || st == "đăng nhập")
+		
 		if (isMy || isEmpty) && isLoginSt {
 			return SearchResult{TargetIndex: i, ResponseType: "login", SystemEmail: extractEmail(row[INDEX_DATA_TIKTOK.EMAIL])}
 		}
@@ -171,31 +149,16 @@ func extractEmail(raw string) string {
 }
 
 func buildResponse(row []interface{}, idx int, typ, msg, devId, email string) *LoginResponse {
+	// 🔥 SỬ DỤNG HÀM MAKE... TỪ UTILS ĐỂ ĐẢM BẢO THỨ TỰ
 	return &LoginResponse{
-		Status: "true", Type: typ, Messenger: msg, DeviceId: devId,
-		RowIndex: RANGES.DATA_START_ROW + idx, SystemEmail: email,
-		AuthProfile: mapProfileSafe(row, 0, 22),
-		ActivityProfile: mapProfileSafe(row, 23, 44),
-		AiProfile: mapProfileSafe(row, 45, 60),
-	}
-}
-
-func mapProfileSafe(row []interface{}, start, end int) map[string]string {
-	res := make(map[string]string)
-	for i := start; i <= end; i++ {
-		key := INDEX_TO_KEY[i]
-		if key != "" {
-			if i < len(row) { res[key] = SafeString(row[i]) } else { res[key] = "" }
-		}
-	}
-	return res
-}
-
-func SafeString(v interface{}) string {
-	if v == nil { return "" }
-	switch val := v.(type) {
-	case string: return val
-	case float64: if val == float64(int64(val)) { return fmt.Sprintf("%.0f", val) }; return fmt.Sprintf("%v", val)
-	default: return fmt.Sprintf("%v", val)
+		Status:          "true",
+		Type:            typ,
+		Messenger:       msg,
+		DeviceId:        devId,
+		RowIndex:        RANGES.DATA_START_ROW + idx,
+		SystemEmail:     email,
+		AuthProfile:     MakeAuthProfile(row),     // Gọi hàm chuẩn
+		ActivityProfile: MakeActivityProfile(row), // Gọi hàm chuẩn
+		AiProfile:       MakeAiProfile(row),       // Gọi hàm chuẩn
 	}
 }
