@@ -7,7 +7,7 @@ import (
 )
 
 // --- Handler Tạo Sheet (Stub hoạt động) ---
-// Giữ nguyên để tool không lỗi, sau này có thể thêm logic tạo sheet thật bằng Google API
+// Giữ nguyên để tool không lỗi sau này có thể thêm logic tạo sheet thật bằng Google API
 func HandleCreateSheets(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "true", "messenger": "Sheets setup completed (Stub)"})
 }
