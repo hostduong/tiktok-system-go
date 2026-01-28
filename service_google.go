@@ -13,14 +13,15 @@ import (
 
 var sheetsService *sheets.Service
 
+// InitGoogleService: Khởi tạo kết nối Google Sheet
+// 🔥 QUAN TRỌNG: Hàm vẫn nhận tham số credJSON để khớp với main.go, 
+// NHƯNG bên trong sẽ KHÔNG DÙNG nó. Code sẽ dùng quyền mặc định của Cloud Run (ADC).
 func InitGoogleService(credJSON []byte) {
 	ctx := context.Background()
 	
-	// 🔥 FIX 1: Xóa bỏ cấu hình http.Client thủ công (Nguyên nhân gây lỗi "Unregistered callers")
-	// 🔥 FIX 2: Khôi phục lại WithCredentialsJSON (Nguyên nhân gây lỗi "Deployment failed" do ADC bị treo)
-	
+	// Khởi tạo Service bằng quyền của chính Server Cloud Run (Project hiện tại)
+	// Giống hệt dòng 18 trong code Node.js: new google.auth.GoogleAuth()
 	srv, err := sheets.NewService(ctx, 
-		option.WithCredentialsJSON(credJSON), // Dùng Key của Gmail B (hostduong-1991)
 		option.WithScopes(
 			"https://www.googleapis.com/auth/spreadsheets",
 			"https://www.googleapis.com/auth/drive",
@@ -34,7 +35,7 @@ func InitGoogleService(credJSON []byte) {
 	}
 	
 	sheetsService = srv
-	fmt.Println("✅ Google Service initialized (Stable JSON Auth).")
+	fmt.Println("✅ Google Service initialized (Using Cloud Run Identity - ADC).")
 }
 
 // =================================================================================================
@@ -66,6 +67,7 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 	}
 
 	// 2. Load from Google
+	// Sử dụng biến RANGES từ config.go
 	readRange := fmt.Sprintf("'%s'!A%d:%s%d", sheetName, RANGES.DATA_START_ROW, RANGES.LIMIT_COL_FULL, RANGES.DATA_MAX_ROW)
 	
 	resp, err := CallGoogleAPI(func() (interface{}, error) {
@@ -73,6 +75,7 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 	})
 	
 	if err != nil {
+		// Log lỗi chi tiết
 		fmt.Printf("❌ [GOOGLE API ERROR] SID: %s | Range: %s | Error: %v\n", spreadsheetId, readRange, err)
 		return nil, err
 	}
@@ -132,6 +135,7 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 	return newCache, nil
 }
 
+// CallGoogleAPI: Wrapper Retry (Bỏ logic custom HTTP Client)
 func CallGoogleAPI(fn func() (interface{}, error)) (interface{}, error) {
 	retries := 3
 	for i := 0; i < retries; i++ {
