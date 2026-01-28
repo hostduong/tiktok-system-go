@@ -8,8 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings" // 🔥 Import strings để dùng TrimSpace
-	"time"
+	"strings"
 
 	firebase "firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/db"
@@ -19,7 +18,6 @@ import (
 var firebaseDB *db.Client
 var AuthInitError error
 
-// InitAuthService: Khởi tạo Firebase
 func InitAuthService(credJSON []byte) {
 	if len(credJSON) == 0 {
 		AuthInitError = fmt.Errorf("Credential Data is empty")
@@ -52,15 +50,16 @@ func InitAuthService(credJSON []byte) {
 	fmt.Println("✅ Firebase Service initialized (V4).")
 }
 
-// AuthMiddleware: Middleware kiểm tra token
 func AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if AuthInitError != nil {
-			http.Error(w, `{"status":"false","messenger":"Server Config Error: `+AuthInitError.Error()+`"}`, 500)
+		// 1. Kiểm tra Global Rate Limit (Lớp 0)
+		if !CheckGlobalRateLimit() {
+			http.Error(w, `{"status":"false","messenger":"Server Busy (Global Limit)"}`, 503)
 			return
 		}
+
 		if firebaseDB == nil {
-			http.Error(w, `{"status":"false","messenger":"Database Connecting... Try again."}`, 503)
+			http.Error(w, `{"status":"false","messenger":"Database Connecting..."}`, 503)
 			return
 		}
 
@@ -69,7 +68,6 @@ func AuthMiddleware(next http.Handler) http.Handler {
 			http.Error(w, `{"status":"false","messenger":"Read Body Error"}`, 400)
 			return
 		}
-		
 		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
 		var bodyMap map[string]interface{}
@@ -78,16 +76,22 @@ func AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// 🔥 FIX QUAN TRỌNG: Chỉ Trim khoảng trắng, KHÔNG đổi sang chữ thường
-		// tokenStr := CleanString(bodyMap["token"]) <--- CŨ (SAI vì làm mất chữ hoa)
-		
 		tokenRaw, _ := bodyMap["token"].(string)
-		tokenStr := strings.TrimSpace(tokenRaw) // <--- MỚI (Giữ nguyên hoa thường)
+		tokenStr := strings.TrimSpace(tokenRaw) // Giữ nguyên hoa thường
 		
+		// 2. Kiểm tra Token + Cache (Lớp 1)
 		authRes := CheckToken(tokenStr)
 		if !authRes.IsValid {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": authRes.Messenger})
+			return
+		}
+
+		// 3. Kiểm tra User Rate Limit (Lớp 2)
+		if !CheckUserRateLimit(tokenStr) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(429) // Too Many Requests
+			json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": "Spam detected (Rate Limit)"})
 			return
 		}
 
@@ -99,55 +103,4 @@ func AuthMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
-}
-
-// CheckToken: Logic kiểm tra Token
-func CheckToken(token string) AuthResult {
-	// Debug log xem Token nhận vào là gì
-	log.Printf("🔍 [DEBUG] Check Token: %s", token)
-
-	if firebaseDB == nil {
-		return AuthResult{IsValid: false, Messenger: "Database chưa sẵn sàng"}
-	}
-
-	if token == "" || len(token) < 10 {
-		return AuthResult{IsValid: false, Messenger: "Token không hợp lệ"}
-	}
-
-	var data map[string]interface{}
-	ref := firebaseDB.NewRef("TOKEN_TIKTOK/" + token)
-	
-	if err := ref.Get(context.Background(), &data); err != nil {
-		log.Printf("❌ [FIREBASE ERROR] %v", err)
-		return AuthResult{IsValid: false, Messenger: "Lỗi kết nối Database"}
-	}
-
-	if data == nil {
-		log.Printf("⚠️ [FIREBASE] Token not found: %s", token)
-		return AuthResult{IsValid: false, Messenger: "Token không tồn tại"}
-	}
-
-	if data["expired"] == nil || data["spreadsheetId"] == nil {
-		return AuthResult{IsValid: false, Messenger: "Token lỗi data"}
-	}
-
-	expStr := fmt.Sprintf("%v", data["expired"])
-	expTime := parseExpirationTime(expStr)
-	
-	if time.Now().After(expTime) {
-		log.Printf("⚠️ [FIREBASE] Token expired: %s", token)
-		return AuthResult{IsValid: false, Messenger: "Token hết hạn"}
-	}
-
-	sid := fmt.Sprintf("%v", data["spreadsheetId"])
-	return AuthResult{IsValid: true, SpreadsheetID: sid, Data: data}
-}
-
-func parseExpirationTime(dateStr string) time.Time {
-	layout := "02/01/2006"
-	t, err := time.Parse(layout, dateStr)
-	if err != nil {
-		return time.Now().Add(24 * time.Hour)
-	}
-	return t.Add(23*time.Hour + 59*time.Minute)
 }
