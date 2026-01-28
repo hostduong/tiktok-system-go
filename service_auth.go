@@ -16,9 +16,15 @@ import (
 )
 
 var firebaseDB *db.Client
+var AuthInitError error // 🔥 Biến lưu lỗi khởi động
 
-// InitAuthService: Khởi tạo Firebase
 func InitAuthService(credJSON []byte) {
+	if len(credJSON) == 0 {
+		AuthInitError = fmt.Errorf("Credential Data is empty")
+		log.Println("❌ [AUTH INIT] " + AuthInitError.Error())
+		return
+	}
+
 	ctx := context.Background()
 	opt := option.WithCredentialsJSON(credJSON)
 	
@@ -28,21 +34,34 @@ func InitAuthService(credJSON []byte) {
 
 	app, err := firebase.NewApp(ctx, conf, opt)
 	if err != nil {
-		log.Fatalf("❌ [CRITICAL] Firebase Init Error: %v", err)
+		AuthInitError = fmt.Errorf("Firebase Init Error: %v", err)
+		log.Println("❌ [AUTH INIT] " + AuthInitError.Error()) // 🔥 Chỉ in log, KHÔNG Fatal
+		return
 	}
 
 	client, err := app.Database(ctx)
 	if err != nil {
-		log.Fatalf("❌ [CRITICAL] Firebase DB Error: %v", err)
+		AuthInitError = fmt.Errorf("Firebase DB Error: %v", err)
+		log.Println("❌ [AUTH INIT] " + AuthInitError.Error()) // 🔥 Chỉ in log, KHÔNG Fatal
+		return
 	}
 
 	firebaseDB = client
 	fmt.Println("✅ Firebase Service initialized (V4).")
 }
 
-// AuthMiddleware: Middleware kiểm tra token
 func AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 🔥 Nếu Firebase lỗi lúc khởi động, báo lỗi ngay cho client biết
+		if AuthInitError != nil {
+			http.Error(w, `{"status":"false","messenger":"Server Config Error: `+AuthInitError.Error()+`"}`, 500)
+			return
+		}
+		if firebaseDB == nil {
+			http.Error(w, `{"status":"false","messenger":"Server Connecting to Database... Try again."}`, 503)
+			return
+		}
+
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, `{"status":"false","messenger":"Read Body Error"}`, 400)
@@ -59,7 +78,6 @@ func AuthMiddleware(next http.Handler) http.Handler {
 
 		tokenStr := CleanString(bodyMap["token"])
 		
-		// 🔥 Gọi hàm CheckToken (Viết hoa)
 		authRes := CheckToken(tokenStr)
 		if !authRes.IsValid {
 			w.Header().Set("Content-Type", "application/json")
@@ -77,9 +95,12 @@ func AuthMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// 🔥 ĐỔI TÊN HÀM: checkTokenFirebase -> CheckToken (Exported)
-// Để các file handler_log.go, handler_search.go có thể gọi được
 func CheckToken(token string) AuthResult {
+	// 🔥 Check an toàn: Nếu DB chưa kết nối thì trả về lỗi luôn, tránh Panic
+	if firebaseDB == nil {
+		return AuthResult{IsValid: false, Messenger: "Database chưa sẵn sàng"}
+	}
+
 	if token == "" || len(token) < 50 {
 		return AuthResult{IsValid: false, Messenger: "Token không hợp lệ"}
 	}
