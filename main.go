@@ -6,18 +6,36 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 )
 
 func main() {
+	// 🟢 STEP 1: Bắt đầu khởi động
+	fmt.Println("🚀 [STARTUP] Starting System V243...")
+
 	// 1. Lấy Credentials từ ENV
-	credJSON := []byte(os.Getenv("FIREBASE_CREDENTIALS"))
-	if len(credJSON) == 0 {
-		log.Fatal("❌ Missing FIREBASE_CREDENTIALS env")
+	rawCred := os.Getenv("FIREBASE_CREDENTIALS")
+	if rawCred == "" {
+		log.Fatal("❌ [CRITICAL ERROR] Missing FIREBASE_CREDENTIALS environment variable. Please check Cloud Run Variables.")
 	}
 
-	// 2. Khởi tạo Service
+	// 🔥 FIX QUAN TRỌNG: Làm sạch chuỗi JSON
+	// Nhiều trường hợp copy paste bị dính dấu " ở đầu đuôi hoặc khoảng trắng thừa gây lỗi JSON parse
+	cleanCred := strings.TrimSpace(rawCred)
+	if strings.HasPrefix(cleanCred, "\"") && strings.HasSuffix(cleanCred, "\"") {
+		cleanCred = strings.Trim(cleanCred, "\"")
+		fmt.Println("⚠️ [WARNING] Detected and removed extra quotes from FIREBASE_CREDENTIALS.")
+	}
+	
+	fmt.Printf("ℹ️ [INFO] Credentials length: %d characters\n", len(cleanCred))
+	credJSON := []byte(cleanCred)
+
+	// 2. Khởi tạo Service (Nếu lỗi sẽ in ra lý do cụ thể ở đây)
+	fmt.Println("🔄 [INIT] Connecting to Firebase...")
 	InitFirebase(credJSON)
+	
+	fmt.Println("🔄 [INIT] Connecting to Google Sheets...")
 	InitGoogleService(credJSON)
 
 	// 3. Router
@@ -33,7 +51,6 @@ func main() {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
-			// Global Rate Limit Check here if needed
 			next(w, r)
 		}
 	}
@@ -51,13 +68,15 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
+	
 	server := &http.Server{Addr: ":" + port, Handler: mux}
 
 	// 5. Graceful Shutdown Setup
 	go func() {
-		fmt.Printf("🚀 Server running on port %s\n", port)
+		fmt.Printf("✅ [READY] Server listening on port %s\n", port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("❌ Server error: %v", err)
+			// Nếu port bị chiếm hoặc không bind được, log lỗi ra đây
+			log.Fatalf("❌ [SERVER ERROR] ListenAndServe: %v", err)
 		}
 	}()
 
@@ -69,7 +88,6 @@ func main() {
 	fmt.Println("🛑 [SIGTERM] Shutting down...")
 	
 	// Force Flush All Queues
-	// Duyệt qua tất cả các queue trong STATE và gọi FlushQueue(sid, true)
 	STATE.QueueMutex.Lock()
 	for sid := range STATE.WriteQueue {
 		FlushQueue(sid, true)
