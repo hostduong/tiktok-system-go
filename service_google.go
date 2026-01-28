@@ -49,7 +49,7 @@ func InitGoogleService(credJSON []byte) {
 }
 
 // =================================================================================================
-// 🟢 CORE LOGIC (Sử dụng biến từ config.go)
+// 🟢 CORE LOGIC
 // =================================================================================================
 
 func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCacheData, error) {
