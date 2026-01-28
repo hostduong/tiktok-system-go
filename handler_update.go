@@ -61,11 +61,23 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 
 	targetIndex := -1
 	isAppend := false
+	
+	// 🔥 FIX QUAN TRỌNG: Hỗ trợ đọc row_index từ cả SỐ và CHUỖI
 	rowIndexInput := -1
-	if v, ok := body["row_index"].(float64); ok {
-		rowIndexInput = int(v)
+	if v, ok := body["row_index"]; ok {
+		switch val := v.(type) {
+		case float64: // Nếu JSON là số: 13
+			rowIndexInput = int(val)
+		case string: // Nếu JSON là chuỗi: "13"
+			if val != "" {
+				if i, err := strconv.Atoi(strings.TrimSpace(val)); err == nil {
+					rowIndexInput = i
+				}
+			}
+		}
 	}
 
+	// Logic parsing cột tìm kiếm
 	searchCols := make(map[int]string)
 	updateCols := make(map[int]interface{})
 
@@ -82,7 +94,9 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 	hasRowIndex := (rowIndexInput >= RANGES.DATA_START_ROW)
 	hasSearchCols := (len(searchCols) > 0)
 
+	// --- LOGIC XÁC ĐỊNH DÒNG (Giống Node.js) ---
 	if hasRowIndex {
+		// Trường hợp 1: Có row_index -> Phải tìm thấy hoặc báo lỗi
 		idx := rowIndexInput - RANGES.DATA_START_ROW
 		if idx >= 0 && idx < len(rows) {
 			if hasSearchCols {
@@ -105,9 +119,11 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 			}
 			targetIndex = idx
 		} else {
+			// Logic Node.js: Có index mà không tìm thấy -> Báo lỗi
 			return nil, fmt.Errorf("Dòng yêu cầu không tồn tại")
 		}
 	} else if hasSearchCols {
+		// Trường hợp 2: Không có row_index, tìm theo cột -> Phải tìm thấy hoặc báo lỗi
 		for i, row := range rows {
 			match := true
 			for colIdx, val := range searchCols {
@@ -128,12 +144,15 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 			}
 		}
 		if targetIndex == -1 {
+			// Logic Node.js: Tìm không thấy -> Báo lỗi
 			return nil, fmt.Errorf("Không tìm thấy nick phù hợp")
 		}
 	} else {
+		// Trường hợp 3: Không có gì cả -> Mới được phép Append
 		isAppend = true
 	}
 
+	// --- PHẦN GHI DỮ LIỆU ---
 	var newRow []interface{}
 	oldNote := ""
 
@@ -223,7 +242,7 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 	}
 }
 
-// 🔥 FIX: Thay đổi kiểu dữ liệu thành string cho sid và sheet
+// Helper Wrappers
 func GoogleServiceUpdate(sid string, sheet string, rowIdx int, data []interface{}) {
 	QueueUpdate(sid, sheet, rowIdx, data)
 }
