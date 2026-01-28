@@ -19,7 +19,8 @@ type UpdateResponse struct {
 	AiProfile       map[string]string `json:"ai_profile"`
 }
 
-func HandleUpdate(w http.ResponseWriter, r *http.Request) {
+// 🔥 Đổi tên hàm thành HandleUpdateData khớp main.go
+func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 	var body map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, `{"status":"false","messenger":"Lỗi Body JSON"}`, 400)
@@ -32,7 +33,7 @@ func HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 🔥 FIX: Dùng SpreadsheetID (D viết hoa)
+	// 🔥 FIX: SpreadsheetID viết hoa chữ D
 	sid := tokenData.SpreadsheetID
 	deviceId := CleanString(body["deviceId"])
 
@@ -61,15 +62,13 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 	rowIndexInput := -1
 	if v, ok := body["row_index"].(float64); ok { rowIndexInput = int(v) }
 
-	// Logic tìm targetIndex (Rút gọn)
 	if rowIndexInput >= RANGES.DATA_START_ROW {
 		idx := rowIndexInput - RANGES.DATA_START_ROW
 		if idx >= 0 && idx < len(rows) { targetIndex = idx }
 	} else { isAppend = true }
 
-	// Prepare data
 	var newRow []interface{}
-	// 🔥 FIX: Xóa biến oldNote gây lỗi biên dịch
+	// 🔥 FIX: Đã xóa biến oldNote không dùng
 	
 	if isAppend {
 		newRow = make([]interface{}, 61)
@@ -82,7 +81,6 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 		}
 	}
 
-	// Update columns
 	for k, v := range body {
 		if strings.HasPrefix(k, "col_") {
 			idx, _ := strconv.Atoi(strings.TrimPrefix(k, "col_"))
@@ -93,7 +91,6 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 	if isDataTiktok {
 		if deviceId != "" { newRow[INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId }
 		content := CleanString(body["note"])
-		// Logic tạo note đơn giản để tránh lỗi unused var
 		now := time.Now().Add(7 * time.Hour).Format("02/01/2006 15:04:05")
 		st := CleanString(newRow[INDEX_DATA_TIKTOK.STATUS])
 		if st == "" { st = "Đang chờ" }
