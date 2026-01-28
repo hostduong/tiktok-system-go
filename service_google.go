@@ -13,14 +13,11 @@ import (
 
 var sheetsService *sheets.Service
 
-// InitGoogleService: Khởi tạo kết nối Google Sheet
-// 🔥 QUAN TRỌNG: Hàm vẫn nhận tham số credJSON để khớp với main.go, 
-// NHƯNG bên trong sẽ KHÔNG DÙNG nó. Code sẽ dùng quyền mặc định của Cloud Run (ADC).
+// InitGoogleService: Sử dụng quyền ADC của Cloud Run (Không dùng JSON Key)
 func InitGoogleService(credJSON []byte) {
 	ctx := context.Background()
 	
-	// Khởi tạo Service bằng quyền của chính Server Cloud Run (Project hiện tại)
-	// Giống hệt dòng 18 trong code Node.js: new google.auth.GoogleAuth()
+	// Kết nối bằng quyền của Cloud Run (Gmail A)
 	srv, err := sheets.NewService(ctx, 
 		option.WithScopes(
 			"https://www.googleapis.com/auth/spreadsheets",
@@ -35,11 +32,11 @@ func InitGoogleService(credJSON []byte) {
 	}
 	
 	sheetsService = srv
-	fmt.Println("✅ Google Service initialized (Using Cloud Run Identity - ADC).")
+	fmt.Println("✅ Google Service initialized (ADC - Cloud Run Identity).")
 }
 
 // =================================================================================================
-// 🟢 CORE LOGIC (Linked with config.go)
+// 🟢 CORE LOGIC
 // =================================================================================================
 
 func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCacheData, error) {
@@ -59,6 +56,7 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 
 	hasPendingWrite := CheckPendingWrite(spreadsheetId, sheetName)
 	
+	// Sử dụng config
 	if !forceLoad && exists && ((now-cache.Timestamp < CACHE.SHEET_VALID_MS) || hasPendingWrite) {
 		STATE.SheetMutex.Lock()
 		cache.LastAccessed = now
@@ -67,7 +65,6 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 	}
 
 	// 2. Load from Google
-	// Sử dụng biến RANGES từ config.go
 	readRange := fmt.Sprintf("'%s'!A%d:%s%d", sheetName, RANGES.DATA_START_ROW, RANGES.LIMIT_COL_FULL, RANGES.DATA_MAX_ROW)
 	
 	resp, err := CallGoogleAPI(func() (interface{}, error) {
@@ -75,7 +72,6 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 	})
 	
 	if err != nil {
-		// Log lỗi chi tiết
 		fmt.Printf("❌ [GOOGLE API ERROR] SID: %s | Range: %s | Error: %v\n", spreadsheetId, readRange, err)
 		return nil, err
 	}
@@ -98,11 +94,16 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 	isDataTiktok := (sheetName == SHEET_NAMES.DATA_TIKTOK)
 
 	for i, row := range rawRows {
+		// Đảm bảo đủ 61 cột
 		fullRow := make([]interface{}, 61)
 		for j, cell := range row { if j < 61 { fullRow[j] = cell } }
 		
-		shortClean := make([]string, CACHE.CLEAN_COL_LIMIT)
-		for k := 0; k < CACHE.CLEAN_COL_LIMIT; k++ { shortClean[k] = CleanString(fullRow[k]) }
+		// 🔥 FIX PANIC: Luôn tạo mảng sạch đủ 61 phần tử
+		// (Thay vì chỉ lấy 7 phần tử như config cũ, vì logic cần đọc password ở cột 8)
+		shortClean := make([]string, 61)
+		for k := 0; k < 61; k++ { 
+			shortClean[k] = CleanString(fullRow[k]) 
+		}
 
 		normalizedRawValues = append(normalizedRawValues, fullRow)
 		cleanValues = append(cleanValues, shortClean)
@@ -135,7 +136,6 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 	return newCache, nil
 }
 
-// CallGoogleAPI: Wrapper Retry (Bỏ logic custom HTTP Client)
 func CallGoogleAPI(fn func() (interface{}, error)) (interface{}, error) {
 	retries := 3
 	for i := 0; i < retries; i++ {
