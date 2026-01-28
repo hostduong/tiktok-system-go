@@ -20,10 +20,18 @@ var firebaseDb *db.Client
 func InitFirebase(credJSON []byte) {
 	ctx := context.Background()
 	opt := option.WithCredentialsJSON(credJSON)
-	app, err := firebase.NewApp(ctx, nil, opt)
+	
+	// 🔥 FIX: Thêm cấu hình Database URL (Lấy từ code Node.js cũ)
+	conf := &firebase.Config{
+		DatabaseURL: "https://hostduong-1991-default-rtdb.asia-southeast1.firebasedatabase.app",
+	}
+
+	app, err := firebase.NewApp(ctx, conf, opt)
 	if err != nil {
 		log.Fatalf("❌ Firebase Init Error: %v", err)
 	}
+	
+	// Khởi tạo DB Client
 	client, err := app.Database(ctx)
 	if err != nil {
 		log.Fatalf("❌ Firebase DB Error: %v", err)
@@ -31,7 +39,7 @@ func InitFirebase(credJSON []byte) {
 	
 	firebaseApp = app
 	firebaseDb = client
-	fmt.Println("✅ Firebase initialized.")
+	fmt.Println("✅ Firebase initialized successfully.")
 }
 
 // =================================================================================================
@@ -86,6 +94,8 @@ func CheckToken(token string) AuthResult {
 	defer cancel()
 	
 	if err := ref.Get(ctx, &data); err != nil {
+		// Log lỗi nhẹ để debug nhưng không chết server
+		fmt.Printf("⚠️ Firebase Get Error: %v\n", err)
 		return AuthResult{IsValid: false, Messenger: "Lỗi kết nối Firebase"}
 	}
 
