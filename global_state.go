@@ -2,103 +2,86 @@ package main
 
 import (
 	"sync"
-	"time"
 )
 
-// 🔥 CẬP NHẬT: Struct TokenData chuẩn (Hợp nhất nhu cầu của main.go và handlers)
-type TokenData struct {
-	Token         string                 // Token chuỗi
-	SpreadsheetID string                 // ID Google Sheet
-	Data          map[string]interface{} // Dữ liệu thô từ Firebase
-	Role          string                 // Vai trò (nếu có)
-	Expired       string                 // Ngày hết hạn
+// Global State container
+var STATE = struct {
+	// Token Cache (Lớp 1 Auth)
+	TokenMutex sync.RWMutex
+	TokenCache map[string]*CachedToken
+
+	// Rate Limit (Lớp 2 Auth)
+	RateMutex sync.Mutex
+	RateLimit map[string]*RateLimitData
+
+	// Global Counter (Lớp 0 Auth)
+	GlobalCounter struct {
+		Mutex     sync.Mutex
+		Count     int
+		LastReset int64
+	}
+
+	// Sheet Data Cache (Core Data)
+	SheetMutex sync.RWMutex
+	SheetCache map[string]*SheetCacheData
+
+	// Write Queue (Hàng đợi ghi đĩa)
+	QueueMutex sync.Mutex
+	WriteQueue map[string]*WriteQueueData
+}{
+	TokenCache: make(map[string]*CachedToken),
+	RateLimit:  make(map[string]*RateLimitData),
+	SheetCache: make(map[string]*SheetCacheData),
+	WriteQueue: make(map[string]*WriteQueueData),
 }
 
-// Struct kết quả Auth (Dùng chung cho service_auth và handlers)
-type AuthResult struct {
-	IsValid       bool
-	Messenger     string
-	SpreadsheetID string
-	Data          map[string]interface{}
-}
-
+// Cấu trúc Cache Token
 type CachedToken struct {
-	Data       TokenData
-	ExpiryTime int64
 	IsInvalid  bool
 	Msg        string
+	Data       TokenData
+	ExpiryTime int64
 }
 
-// Cấu trúc lưu Sheet Cache (Dữ liệu Excel trên RAM)
-type SheetCacheData struct {
-	RawValues     [][]interface{}
-	CleanValues   [][]string
-	Indices       map[string]map[string]int
-	StatusIndices map[string][]int
-	Timestamp     int64
-	TTL           int64
-	LastAccessed  int64
-	Source        string
-	Mutex         sync.RWMutex
+type TokenData struct {
+	Token         string                 `json:"token"`
+	SpreadsheetID string                 `json:"spreadsheetId"`
+	Data          map[string]interface{} `json:"data"`
+	Expired       string                 `json:"expired"`
 }
 
-// Cấu trúc Hàng đợi Ghi (Write Queue)
-type WriteQueueData struct {
-	Timer        *time.Timer
-	Updates      map[string]map[int][]interface{}
-	Appends      map[string][][]interface{}
-	SheetRetries map[string]int
-	IsFlushing   bool
-	Mutex        sync.Mutex
-}
-
-// Cấu trúc Hàng đợi Mail (Mail Queue)
-type MailQueueData struct {
-	Timer      *time.Timer
-	Rows       map[int]bool
-	IsFlushing bool
-	Mutex      sync.Mutex
-}
-
-// Cấu trúc Rate Limit
 type RateLimitData struct {
-	Count      int
-	ErrorCount int
-	LastReset  int64
-	LastSeen   int64
-	BanUntil   int64
+	Count     int
+	LastReset int64
 }
 
-// 🔥 GLOBAL STATE CONTAINER
-var STATE = struct {
-	TokenCache    map[string]*CachedToken
-	TokenMutex    sync.RWMutex
+// 🔥 CẤU TRÚC CACHE PHÂN VÙNG (Partitioned Cache)
+type SheetCacheData struct {
+	RawValues   [][]interface{} // Dữ liệu gốc (Source of Truth)
+	CleanValues [][]string      // Dữ liệu đã chuẩn hóa
 
-	SheetCache    map[string]*SheetCacheData
-	SheetMutex    sync.RWMutex
+	// 1. Map truy cập nhanh theo DeviceID (O(1))
+	// Key: DeviceID -> Value: RowIndex
+	// Giúp tìm nick cũ ngay lập tức mà không cần loop.
+	AssignedMap map[string]int
 
-	WriteQueue    map[string]*WriteQueueData
-	QueueMutex    sync.RWMutex
+	// 2. Danh sách Nick trống (Chưa có chủ)
+	// Chỉ chứa RowIndex của các dòng có DeviceId == ""
+	UnassignedList []int
 
-	MailQueue     map[string]*MailQueueData
-	MailMutex     sync.RWMutex
+	// 3. Map phân loại theo Status (để lọc nhanh nhóm "đang chờ", "đăng ký"...)
+	// Key: Status -> Value: Danh sách RowIndex
+	StatusMap map[string][]int
 
-	RateLimit     map[string]*RateLimitData
-	RateMutex     sync.Mutex
+	LastAccessed int64
+	Timestamp    int64
+	TTL          int64
+}
 
-	GlobalCounter struct {
-		LastReset int64
-		Count     int
-		Mutex     sync.Mutex
-	}
-    
-	CreationLocks map[string]int64
-	CreationMutex sync.Mutex
-}{
-	TokenCache:    make(map[string]*CachedToken),
-	SheetCache:    make(map[string]*SheetCacheData),
-	WriteQueue:    make(map[string]*WriteQueueData),
-	MailQueue:     make(map[string]*MailQueueData),
-	RateLimit:     make(map[string]*RateLimitData),
-	CreationLocks: make(map[string]int64),
+// Cấu trúc hàng đợi ghi
+type WriteQueueData struct {
+	Timer      bool // Đánh dấu đang có timer chạy flush hay không (giả lập)
+	IsFlushing bool
+	Updates    map[string]map[int][]interface{} // SheetName -> RowIndex -> Data
+	Appends    map[string][][]interface{}       // SheetName -> List Rows
 }
