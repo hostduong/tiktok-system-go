@@ -17,7 +17,6 @@ var sheetsService *sheets.Service
 func InitGoogleService(credJSON []byte) {
 	ctx := context.Background()
 	
-	// Cấu hình HTTP Client tối ưu (Keep-Alive) giống Node.js Agent
 	httpClient := &http.Client{
 		Transport: &http.Transport{
 			MaxIdleConns:        100,
@@ -27,8 +26,7 @@ func InitGoogleService(credJSON []byte) {
 		Timeout: 30 * time.Second,
 	}
 
-	// 🔥 FIX QUAN TRỌNG: Thêm Scopes giống hệt Node.js (Dòng 18 file gốc)
-	// Nếu thiếu dòng này, Service Account sẽ không có quyền thao tác dù đã share quyền
+	// Thêm Scopes giống Node.js
 	srv, err := sheets.NewService(ctx, 
 		option.WithCredentialsJSON(credJSON), 
 		option.WithHTTPClient(httpClient),
@@ -39,8 +37,13 @@ func InitGoogleService(credJSON []byte) {
 	)
 	
 	if err != nil {
-		log.Fatalf("❌ Google Sheets Init Error: %v", err)
+		// 🔥 FIX: Thay log.Fatalf (chết luôn) bằng log.Printf (chỉ báo lỗi)
+		// Server sẽ vẫn chạy tiếp để bạn vào xem log được
+		log.Printf("❌ [CRITICAL] Google Sheets Init Error: %v", err)
+		sheetsService = nil
+		return
 	}
+	
 	sheetsService = srv
 	fmt.Println("✅ Google Service initialized (With Scopes).")
 }
@@ -50,6 +53,11 @@ func InitGoogleService(credJSON []byte) {
 // =================================================================================================
 
 func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCacheData, error) {
+	// Kiểm tra xem Service có khởi tạo thành công không
+	if sheetsService == nil {
+		return nil, fmt.Errorf("Google Sheets Service chưa được khởi tạo (Lỗi API/Key)")
+	}
+
 	// 1. Check RAM
 	cacheKey := spreadsheetId + KEY_SEPARATOR + sheetName
 	now := time.Now().UnixMilli()
@@ -70,13 +78,11 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 	// 2. Load from Google
 	readRange := fmt.Sprintf("'%s'!A%d:%s%d", sheetName, RANGES.DATA_START_ROW, RANGES.LIMIT_COL_FULL, RANGES.DATA_MAX_ROW)
 	
-	// Gọi API đọc dữ liệu
 	resp, err := CallGoogleAPI(func() (interface{}, error) {
 		return sheetsService.Spreadsheets.Values.Get(spreadsheetId, readRange).ValueRenderOption("UNFORMATTED_VALUE").Do()
 	})
 	
 	if err != nil {
-		// Log lỗi rõ ràng để biết tại sao
 		fmt.Printf("❌ [GOOGLE API ERROR] SID: %s | Sheet: %s | Error: %v\n", spreadsheetId, sheetName, err)
 		return nil, err
 	}
@@ -86,7 +92,7 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 
 	rawRows := valuesResp.Values
 	
-	// 3. Normalize Data
+	// 3. Normalize
 	normalizedRawValues := make([][]interface{}, 0)
 	cleanValues := make([][]string, 0)
 	indices := make(map[string]map[string]int)
@@ -140,7 +146,7 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 	return newCache, nil
 }
 
-// CallGoogleAPI: Wrapper Retry
+// CallGoogleAPI Wrapper
 func CallGoogleAPI(fn func() (interface{}, error)) (interface{}, error) {
 	retries := 3
 	for i := 0; i < retries; i++ {
@@ -155,7 +161,7 @@ func CallGoogleAPI(fn func() (interface{}, error)) (interface{}, error) {
 	return nil, fmt.Errorf("Max retries exceeded")
 }
 
-// --- CÁC HÀM QUEUE KHÔNG ĐỔI ---
+// --- QUEUE FUNCTIONS (Giữ nguyên) ---
 func QueueUpdate(sid string, sheetName string, rowIndex int, data []interface{}) {
 	q := GetQueue(sid)
 	q.Mutex.Lock()
@@ -207,6 +213,8 @@ func FlushQueue(sid string, isShutdown bool) {
 		q.Mutex.Unlock()
 	}()
 
+	if sheetsService == nil { return } // Bảo vệ nếu service chưa init
+
 	valueUpdates := []*sheets.ValueRange{}
 	for sheetName, rowsMap := range updatesSnapshot {
 		for rIdx, data := range rowsMap {
@@ -217,19 +225,17 @@ func FlushQueue(sid string, isShutdown bool) {
 	}
 
 	if len(valueUpdates) > 0 {
-		_, err := CallGoogleAPI(func() (interface{}, error) {
+		CallGoogleAPI(func() (interface{}, error) {
 			return sheetsService.Spreadsheets.Values.BatchUpdate(sid, &sheets.BatchUpdateValuesRequest{ ValueInputOption: "RAW", Data: valueUpdates }).Do()
 		})
-		if err != nil { log.Printf("❌ [FLUSH UPDATE ERROR] %v", err) }
 	}
 
 	for sheetName, rows := range appendsSnapshot {
 		if len(rows) == 0 { continue }
 		rng := fmt.Sprintf("'%s'!A1", sheetName)
-		_, err := CallGoogleAPI(func() (interface{}, error) {
+		CallGoogleAPI(func() (interface{}, error) {
 			return sheetsService.Spreadsheets.Values.Append(sid, rng, &sheets.ValueRange{ Values: rows }).ValueInputOption("RAW").InsertDataOption("INSERT_ROWS").Do()
 		})
-		if err != nil { log.Printf("❌ [FLUSH APPEND ERROR] %v", err) }
 	}
 }
 
@@ -264,7 +270,7 @@ func FlushMailQueue(sid string, isShutdown bool) {
 		STATE.MailMutex.Unlock()
 	}()
 
-	if len(rowsToFlush) == 0 { return }
+	if len(rowsToFlush) == 0 || sheetsService == nil { return }
 	batchRequests := []*sheets.ValueRange{}
 	for _, rIdx := range rowsToFlush {
 		rng := fmt.Sprintf("'%s'!H%d", SHEET_NAMES.EMAIL_LOGGER, rIdx)
