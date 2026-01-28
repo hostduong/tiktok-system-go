@@ -7,9 +7,10 @@ import (
 	"strings"
 	"time"
 
-	// 🔥 UPDATE: Import đường dẫn v4
+	// 🔥 QUAN TRỌNG: Phải có đuôi /v4 ở cuối thì mới chạy được ở Châu Á
 	firebase "firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/db"
+	
 	"google.golang.org/api/option"
 )
 
@@ -54,16 +55,19 @@ type AuthResult struct {
 }
 
 func CheckToken(token string) AuthResult {
+	// Validate sơ bộ
 	if token == "" || len(token) < 50 || len(token) > 200 || !REGEX_TOKEN.MatchString(token) {
 		return AuthResult{IsValid: false, Messenger: "Token sai định dạng"}
 	}
 
+	// Rate Limit
 	if !checkRateLimit(token, false) {
 		return AuthResult{IsValid: false, Messenger: "Token bị giới hạn tạm thời (Spam)"}
 	}
 
 	now := time.Now().UnixMilli()
 
+	// Check RAM
 	STATE.TokenMutex.RLock()
 	cached, found := STATE.TokenCache[token]
 	STATE.TokenMutex.RUnlock()
@@ -80,6 +84,7 @@ func CheckToken(token string) AuthResult {
 		STATE.TokenMutex.Unlock()
 	}
 
+	// Check Firebase
 	ref := firebaseDb.NewRef("TOKEN_TIKTOK/" + token)
 	var data map[string]interface{}
 	
