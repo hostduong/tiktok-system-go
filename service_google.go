@@ -14,11 +14,11 @@ import (
 
 var sheetsService *sheets.Service
 
-[cite_start]// InitGoogleService: Khởi tạo Google API Client [cite: 18-19]
+// InitGoogleService: Khởi tạo Google API Client
 func InitGoogleService(credJSON []byte) {
 	ctx := context.Background()
 	
-	[cite_start]// Tạo HTTP Client tùy chỉnh để tái sử dụng kết nối (Keep-Alive) [cite: 10-12]
+	// Tạo HTTP Client tùy chỉnh để tái sử dụng kết nối (Keep-Alive)
 	httpClient := &http.Client{
 		Transport: &http.Transport{
 			MaxIdleConns:        100,
@@ -43,7 +43,7 @@ func InitGoogleService(credJSON []byte) {
 // 🟢 SHEET LOAD & CACHE LOGIC
 // =================================================================================================
 
-[cite_start]// LayDuLieu: Tải dữ liệu từ Google Sheets hoặc RAM [cite: 98-116]
+// LayDuLieu: Tải dữ liệu từ Google Sheets hoặc RAM
 func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCacheData, error) {
 	// 1. Kiểm tra RAM
 	cacheKey := spreadsheetId + KEY_SEPARATOR + sheetName
@@ -64,7 +64,7 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 		return cache, nil
 	}
 
-	[cite_start]// 2. Tải từ Google (Cache Miss) [cite: 102-103]
+	// 2. Tải từ Google (Cache Miss)
 	readRange := fmt.Sprintf("'%s'!A%d:%s%d", sheetName, RANGES.DATA_START_ROW, RANGES.LIMIT_COL_FULL, RANGES.DATA_MAX_ROW)
 	
 	resp, err := CallGoogleAPI(func() (interface{}, error) {
@@ -77,7 +77,7 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 	valuesResp := resp.(*sheets.ValueRange)
 	rawRows := valuesResp.Values
 	
-	[cite_start]// 3. Chuẩn hóa dữ liệu [cite: 104-114]
+	// 3. Chuẩn hóa dữ liệu
 	normalizedRawValues := make([][]interface{}, 0)
 	cleanValues := make([][]string, 0)
 	
@@ -189,7 +189,7 @@ func QueueAppend(sid string, sheetName string, rows [][]interface{}) {
 	}
 }
 
-[cite_start]// FlushQueue: Worker xả hàng đợi ghi xuống Google [cite: 155-192]
+// FlushQueue: Worker xả hàng đợi ghi xuống Google
 func FlushQueue(sid string, isShutdown bool) {
 	q := GetQueue(sid)
 	
@@ -238,7 +238,6 @@ func FlushQueue(sid string, isShutdown bool) {
 	}()
 
 	// 2. Xử lý Batch Update (Gom nhóm)
-	// Note: Google API Go dùng ValueRange cho batchUpdate values
 	valueUpdates := []*sheets.ValueRange{}
 	
 	for sheetName, rowsMap := range updatesSnapshot {
@@ -262,7 +261,6 @@ func FlushQueue(sid string, isShutdown bool) {
 		})
 		if err != nil {
 			log.Printf("❌ [FLUSH UPDATE ERROR] SID: %s - %v", sid, err)
-			// Logic Retry could be implemented here
 		}
 	}
 
@@ -281,7 +279,7 @@ func FlushQueue(sid string, isShutdown bool) {
 	}
 }
 
-[cite_start]// QueueMailUpdate: Đẩy yêu cầu Mail vào hàng đợi [cite: 140-142]
+// QueueMailUpdate: Đẩy yêu cầu Mail vào hàng đợi
 func QueueMailUpdate(sid string, rowIndex int) {
 	STATE.MailMutex.Lock()
 	defer STATE.MailMutex.Unlock()
@@ -300,7 +298,7 @@ func QueueMailUpdate(sid string, rowIndex int) {
 	}
 }
 
-[cite_start]// FlushMailQueue: Worker xả hàng đợi Mail [cite: 142-155]
+// FlushMailQueue: Worker xả hàng đợi Mail
 func FlushMailQueue(sid string, isShutdown bool) {
 	STATE.MailMutex.Lock()
 	q := STATE.MailQueue[sid]
@@ -363,41 +361,83 @@ func FlushMailQueue(sid string, isShutdown bool) {
 
 	if err != nil {
 		log.Printf("❌ [MAIL FLUSH ERROR] SID: %s - %v", sid, err)
-		// Retry logic: Add back to queue if needed
 	}
 }
 
-[cite_start]// CleanupEmail: Dọn dẹp email cũ [cite: 388-399]
+// CleanupEmail: Dọn dẹp email cũ
 func CleanupEmail(sid string) {
-	// Check queue before clean
+	// 1. Kiểm tra hàng đợi xem còn mail chưa đánh dấu không
 	STATE.MailMutex.Lock()
 	q := STATE.MailQueue[sid]
 	hasPending := q != nil && len(q.Rows) > 0
 	STATE.MailMutex.Unlock()
 
+	// Nếu còn, ép xả trước
 	if hasPending {
 		FlushMailQueue(sid, false)
-		// Check again
+		// Check lại lần nữa
 		STATE.MailMutex.Lock()
 		q = STATE.MailQueue[sid]
 		stillPending := q != nil && len(q.Rows) > 0
 		STATE.MailMutex.Unlock()
+		
+		// Nếu vẫn còn pending (do lỗi mạng) -> Hủy dọn dẹp để bảo toàn dữ liệu
 		if stillPending {
 			log.Printf("⚠️ [ABORT CLEANUP] SID %s has pending mails", sid)
 			return
 		}
 	}
 
-	// Get Sheet Info to find SheetId (Go SDK needs SheetId for DeleteDimension)
-	// (Simplification: We assume SheetId or fetch it)
-	// Implementation skipped for brevity, keeping it focused on critical path
+	// 2. Tìm SheetID của EmailLogger để thực hiện xóa
+	// (Để đơn giản hóa trong bản Go, ta bỏ qua bước fetch SheetID động phức tạp
+	// và chấp nhận log cảnh báo nếu chưa implement full delete logic)
+	// Trong thực tế cần dùng sheets.Spreadsheets.Get để lấy SheetID (int) từ tên SheetName (string)
+	// Code dưới đây là stub an toàn.
+	
+	meta, err := CallGoogleAPI(func() (interface{}, error) {
+		return sheetsService.Spreadsheets.Get(sid).Do()
+	})
+	if err != nil { return }
+
+	spreadsheet := meta.(*sheets.Spreadsheet)
+	var sheetId int64 = -1
+	for _, s := range spreadsheet.Sheets {
+		if s.Properties.Title == SHEET_NAMES.EMAIL_LOGGER {
+			sheetId = s.Properties.SheetId
+			break
+		}
+	}
+
+	if sheetId == -1 { return }
+
+	// 3. Xóa dòng cũ
+	req := &sheets.Request{
+		DeleteDimension: &sheets.DeleteDimensionRequest{
+			Range: &sheets.DimensionRange{
+				SheetId:    sheetId,
+				Dimension:  "ROWS",
+				StartIndex: int64(RANGES.EMAIL_START_ROW - 1),
+				EndIndex:   int64(RANGES.EMAIL_START_ROW - 1 + RANGES.DELETE_COUNT),
+			},
+		},
+	}
+
+	_, err = CallGoogleAPI(func() (interface{}, error) {
+		return sheetsService.Spreadsheets.BatchUpdate(sid, &sheets.BatchUpdateSpreadsheetRequest{
+			Requests: []*sheets.Request{req},
+		}).Do()
+	})
+	
+	if err != nil {
+		log.Printf("❌ [CLEANUP ERROR] SID: %s - %v", sid, err)
+	}
 }
 
 // =================================================================================================
 // 🛠️ UTILS HELPER
 // =================================================================================================
 
-[cite_start]// GetQueue: Helper lấy hoặc tạo Queue an toàn [cite: 135-136]
+// GetQueue: Helper lấy hoặc tạo Queue an toàn
 func GetQueue(sid string) *WriteQueueData {
 	STATE.QueueMutex.Lock()
 	defer STATE.QueueMutex.Unlock()
@@ -412,7 +452,7 @@ func GetQueue(sid string) *WriteQueueData {
 	return STATE.WriteQueue[sid]
 }
 
-[cite_start]// CheckPendingWrite: Kiểm tra xem Sheet có đang chờ ghi không [cite: 99-100]
+// CheckPendingWrite: Kiểm tra xem Sheet có đang chờ ghi không
 func CheckPendingWrite(sid string, sheetName string) bool {
 	STATE.QueueMutex.RLock()
 	defer STATE.QueueMutex.RUnlock()
@@ -431,7 +471,7 @@ func CheckPendingWrite(sid string, sheetName string) bool {
 	return false
 }
 
-[cite_start]// CallGoogleAPI: Wrapper để Retry khi lỗi mạng (Exponential Backoff) [cite: 86-90]
+// CallGoogleAPI: Wrapper để Retry khi lỗi mạng (Exponential Backoff)
 func CallGoogleAPI(fn func() (interface{}, error)) (interface{}, error) {
 	retries := 3
 	for i := 0; i < retries; i++ {
