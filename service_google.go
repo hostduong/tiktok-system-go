@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net/http"
 	"strings"
 	"time"
 
@@ -17,20 +16,13 @@ var sheetsService *sheets.Service
 func InitGoogleService(credJSON []byte) {
 	ctx := context.Background()
 	
-	// Cấu hình HTTP Client (Tối ưu Keep-Alive giống Node.js Source 10-12)
-	httpClient := &http.Client{
-		Transport: &http.Transport{
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 25,
-			IdleConnTimeout:     60 * time.Second,
-		},
-		Timeout: 30 * time.Second,
-	}
+	// 🔥 ĐÃ XÓA: Cấu hình HTTP Client thủ công (nguyên nhân gây lỗi mất Auth)
+	// Go mặc định đã hỗ trợ Keep-Alive rất tốt.
 
-	// Scopes chuẩn (Khớp Node.js Source 18)
+	// Khởi tạo Service chuẩn
 	srv, err := sheets.NewService(ctx, 
 		option.WithCredentialsJSON(credJSON), 
-		option.WithHTTPClient(httpClient),
+		// ❌ Đã bỏ dòng option.WithHTTPClient(...) để thư viện tự xử lý Auth
 		option.WithScopes(
 			"https://www.googleapis.com/auth/spreadsheets",
 			"https://www.googleapis.com/auth/drive",
@@ -38,18 +30,17 @@ func InitGoogleService(credJSON []byte) {
 	)
 	
 	if err != nil {
-		// Log lỗi nhưng không crash app để còn debug được
 		log.Printf("❌ [CRITICAL] Google Sheets Init Error: %v", err)
 		sheetsService = nil
 		return
 	}
 	
 	sheetsService = srv
-	fmt.Println("✅ Google Service initialized (Linked with config.go).")
+	fmt.Println("✅ Google Service initialized (Fixed Auth).")
 }
 
 // =================================================================================================
-// 🟢 CORE LOGIC
+// 🟢 CORE LOGIC (Sử dụng biến từ config.go)
 // =================================================================================================
 
 func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCacheData, error) {
@@ -57,10 +48,8 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 		return nil, fmt.Errorf("Google Sheets Service chưa kết nối") 
 	}
 
-	// Nếu không truyền tên sheet, lấy mặc định từ config.go (SHEET_NAMES.DATA_TIKTOK)
 	if sheetName == "" { sheetName = SHEET_NAMES.DATA_TIKTOK }
 
-	// 1. Check RAM
 	cacheKey := spreadsheetId + KEY_SEPARATOR + sheetName
 	now := time.Now().UnixMilli()
 
@@ -70,7 +59,6 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 
 	hasPendingWrite := CheckPendingWrite(spreadsheetId, sheetName)
 	
-	// Sử dụng CACHE.SHEET_VALID_MS từ config.go
 	if !forceLoad && exists && ((now-cache.Timestamp < CACHE.SHEET_VALID_MS) || hasPendingWrite) {
 		STATE.SheetMutex.Lock()
 		cache.LastAccessed = now
@@ -78,9 +66,6 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 		return cache, nil
 	}
 
-	// 2. Load from Google
-	// 🔥 SỬ DỤNG BIẾN TỪ FILE config.go
-	// Node.js Source 103: readRange
 	readRange := fmt.Sprintf("'%s'!A%d:%s%d", sheetName, RANGES.DATA_START_ROW, RANGES.LIMIT_COL_FULL, RANGES.DATA_MAX_ROW)
 	
 	resp, err := CallGoogleAPI(func() (interface{}, error) {
@@ -97,7 +82,6 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 
 	rawRows := valuesResp.Values
 	
-	// 3. Normalize Data
 	normalizedRawValues := make([][]interface{}, 0)
 	cleanValues := make([][]string, 0)
 	indices := make(map[string]map[string]int)
@@ -115,7 +99,6 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 			if j < 61 { fullRow[j] = cell }
 		}
 		
-		// Sử dụng CACHE.CLEAN_COL_LIMIT từ config.go
 		shortClean := make([]string, CACHE.CLEAN_COL_LIMIT)
 		for k := 0; k < CACHE.CLEAN_COL_LIMIT; k++ {
 			shortClean[k] = CleanString(fullRow[k])
@@ -124,7 +107,6 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 		normalizedRawValues = append(normalizedRawValues, fullRow)
 		cleanValues = append(cleanValues, shortClean)
 
-		// Sử dụng INDEX_DATA_TIKTOK từ config.go để map dữ liệu
 		if isDataTiktok {
 			uid := shortClean[INDEX_DATA_TIKTOK.USER_ID]
 			sec := shortClean[INDEX_DATA_TIKTOK.USER_SEC]
@@ -153,14 +135,12 @@ func LayDuLieu(spreadsheetId string, sheetName string, forceLoad bool) (*SheetCa
 	return newCache, nil
 }
 
-// Helper: Gọi API có Retry (Giống Node.js Source 87)
 func CallGoogleAPI(fn func() (interface{}, error)) (interface{}, error) {
 	retries := 3
 	for i := 0; i < retries; i++ {
 		res, err := fn()
 		if err == nil { return res, nil }
 		errStr := err.Error()
-		// Node.js Source 89: Không retry nếu lỗi 400/403/404/Invalid
 		if strings.Contains(errStr, "400") || strings.Contains(errStr, "403") || strings.Contains(errStr, "404") || strings.Contains(errStr, "invalid") {
 			return nil, err
 		}
@@ -169,7 +149,7 @@ func CallGoogleAPI(fn func() (interface{}, error)) (interface{}, error) {
 	return nil, fmt.Errorf("Max retries exceeded")
 }
 
-// --- QUEUE FUNCTIONS (Sử dụng config.go) ---
+// --- QUEUE FUNCTIONS ---
 
 func QueueUpdate(sid string, sheetName string, rowIndex int, data []interface{}) {
 	q := GetQueue(sid)
@@ -178,7 +158,6 @@ func QueueUpdate(sid string, sheetName string, rowIndex int, data []interface{})
 	if q.Updates[sheetName] == nil { q.Updates[sheetName] = make(map[int][]interface{}) }
 	q.Updates[sheetName][rowIndex] = data
 	if q.Timer == nil {
-		// Sử dụng QUEUE.FLUSH_INTERVAL_MS từ config.go
 		q.Timer = time.AfterFunc(time.Duration(QUEUE.FLUSH_INTERVAL_MS)*time.Millisecond, func() { FlushQueue(sid, false) })
 	}
 }
@@ -228,7 +207,6 @@ func FlushQueue(sid string, isShutdown bool) {
 	valueUpdates := []*sheets.ValueRange{}
 	for sheetName, rowsMap := range updatesSnapshot {
 		for rIdx, data := range rowsMap {
-			// Sử dụng RANGES.DATA_START_ROW và LIMIT_COL_FULL từ config.go
 			actualRow := RANGES.DATA_START_ROW + rIdx
 			rng := fmt.Sprintf("'%s'!A%d:%s%d", sheetName, actualRow, RANGES.LIMIT_COL_FULL, actualRow)
 			valueUpdates = append(valueUpdates, &sheets.ValueRange{ Range: rng, Values: [][]interface{}{data} })
@@ -284,7 +262,6 @@ func FlushMailQueue(sid string, isShutdown bool) {
 	if len(rowsToFlush) == 0 || sheetsService == nil { return }
 	batchRequests := []*sheets.ValueRange{}
 	for _, rIdx := range rowsToFlush {
-		// Sử dụng SHEET_NAMES.EMAIL_LOGGER từ config.go
 		rng := fmt.Sprintf("'%s'!H%d", SHEET_NAMES.EMAIL_LOGGER, rIdx)
 		batchRequests = append(batchRequests, &sheets.ValueRange{ Range: rng, Values: [][]interface{}{{"TRUE"}} })
 	}
