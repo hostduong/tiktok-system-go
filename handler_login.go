@@ -21,7 +21,15 @@ type LoginResponse struct {
 	AiProfile       AiProfile       `json:"ai_profile"`
 }
 
-// Handler chính cho: login, register, auto, view, reset
+// Map các trạng thái ưu tiên cho từng hành động
+var PRIORITY_GROUPS = map[string][]string{
+	"login":    {STATUS_READ.RUNNING, STATUS_READ.WAITING, STATUS_READ.LOGIN},
+	"register": {STATUS_READ.REGISTERING, STATUS_READ.WAIT_REG, STATUS_READ.REGISTER},
+	"auto":     {STATUS_READ.RUNNING, STATUS_READ.WAITING, STATUS_READ.LOGIN, STATUS_READ.REGISTERING, STATUS_READ.WAIT_REG, STATUS_READ.REGISTER},
+}
+
+func init() {}
+
 func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 	var body map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -35,13 +43,13 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	spreadsheetId := tokenData.SpreadsheetID
+	sid := tokenData.SpreadsheetID
 	deviceId := CleanString(body["deviceId"])
 	reqType := CleanString(body["type"])
 	reqAction := CleanString(body["action"])
 
 	// Logic map action chuẩn Node.js
-	action := "login" 
+	action := "login"
 	if reqType == "view" {
 		action = "view_only"
 	} else if reqType == "auto" {
@@ -55,9 +63,7 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 		action = "login_reset"
 	}
 
-	body["action"] = action
-
-	res, err := xu_ly_lay_du_lieu(spreadsheetId, deviceId, body, action)
+	res, err := xu_ly_lay_du_lieu(sid, deviceId, body, action)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": err.Error()})
@@ -69,340 +75,287 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action string) (*LoginResponse, error) {
+	// Nạp dữ liệu (Smart Load đã phân vùng sẵn)
 	cacheData, err := LayDuLieu(sid, SHEET_NAMES.DATA_TIKTOK, false)
 	if err != nil {
 		return nil, fmt.Errorf("Lỗi tải dữ liệu")
 	}
 
-	allData := cacheData.RawValues
-	cleanValues := cacheData.CleanValues
+	var targetIndex = -1
+	var responseType = "login"
+	var sysEmail = ""
 	
-	targetIndex := -1
-	targetData := make([]interface{}, 61)
-	responseType := "login"
-	sysEmail := ""
-	
-	var cleanupIndices []int
-	var badIndices []map[string]interface{}
-
-	// 🔥 FIX: Logic đọc row_index thông minh (Hỗ trợ cả String và Int/Float)
-	reqRowIndex := -1
-	if v, ok := body["row_index"]; ok {
-		switch val := v.(type) {
-		case float64:
-			reqRowIndex = int(val)
-		case string:
-			if val != "" {
-				if i, err := strconv.Atoi(strings.TrimSpace(val)); err == nil {
-					reqRowIndex = i
-				}
-			}
-		}
-	}
-	
-	// --- 1. FAST MODE ---
-	isFast := false
-	if reqRowIndex >= RANGES.DATA_START_ROW {
-		idx := reqRowIndex - RANGES.DATA_START_ROW
-		
-		if idx >= 0 && idx < len(allData) {
-			clean := cleanValues[idx]
-			s_uid := CleanString(body["search_user_id"])
-			
-			match := (s_uid == "") || (clean[INDEX_DATA_TIKTOK.USER_ID] == s_uid)
-			
-			if match {
-				val := kiem_tra_chat_luong_clean(clean, action)
+	// --- 1. [OPTIMIZED] TÌM NICK CŨ CỦA THIẾT BỊ (ĐỘ ƯU TIÊN CAO NHẤT) ---
+	// Thay vì quét vòng lặp, ta tra cứu trực tiếp trong AssignedMap (O(1))
+	// Đây là cải tiến lớn nhất về tốc độ.
+	if idx, ok := cacheData.AssignedMap[deviceId]; ok {
+		// Kiểm tra tính hợp lệ (Row còn tồn tại và DeviceID chưa bị xóa)
+		if idx < len(cacheData.RawValues) {
+			currentDev := CleanString(cacheData.RawValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID])
+			if currentDev == deviceId {
+				// Tìm thấy nick cũ -> Kiểm tra xem có thỏa mãn điều kiện action không
+				cleanRow := cacheData.CleanValues[idx]
+				val := kiem_tra_chat_luong_clean(cleanRow, action)
 				
+				// Nếu nick vẫn ngon -> Lấy luôn
 				if val.Valid {
 					targetIndex = idx
-					targetData = allData[idx]
-					isFast = true
 					sysEmail = val.SystemEmail
-					
-					st := clean[INDEX_DATA_TIKTOK.STATUS]
+					st := cleanRow[INDEX_DATA_TIKTOK.STATUS]
 					if st == STATUS_READ.REGISTER || st == STATUS_READ.REGISTERING || st == STATUS_READ.WAIT_REG {
 						responseType = "register"
-					} else {
-						responseType = "login"
 					}
-					
-					cleanupIndices = lay_danh_sach_cleanup(cleanValues, cacheData.Indices, deviceId, false, idx)
-				} else if action != "view_only" {
-					badIndices = append(badIndices, map[string]interface{}{
-						"index": idx, "msg": "Thiếu " + val.Missing,
-					})
+					// Fast Path Return
+					return commit_and_response(sid, deviceId, cacheData, targetIndex, responseType, sysEmail, action)
+				}
+				// Nếu nick cũ bị lỗi -> Vẫn giữ index để báo lỗi hoặc ignore, 
+				// nhưng theo logic Node.js: nick cũ lỗi thì coi như mất, tìm nick mới.
+				// Ở đây ta reset targetIndex để xuống bước dưới tìm nick mới.
+				targetIndex = -1
+			}
+		}
+	}
+
+	// --- 2. TÌM KIẾM NÂNG CAO (Search Col) ---
+	// Nếu client gửi yêu cầu tìm kiếm cụ thể (search_col_X)
+	searchCols := make(map[int]string)
+	for k, v := range body {
+		if strings.HasPrefix(k, "search_col_") {
+			if i, err := strconv.Atoi(strings.TrimPrefix(k, "search_col_")); err == nil {
+				searchCols[i] = CleanString(v)
+			}
+		} else if k == "search_user_id" { // Hỗ trợ legacy
+			searchCols[INDEX_DATA_TIKTOK.USER_ID] = CleanString(v)
+		} else if k == "search_email" { // Hỗ trợ legacy
+			searchCols[INDEX_DATA_TIKTOK.EMAIL] = CleanString(v)
+		}
+	}
+
+	if len(searchCols) > 0 {
+		// Duyệt mảng để tìm (vì search là tác vụ ít khi dùng, O(N) chấp nhận được)
+		for i, row := range cacheData.CleanValues {
+			match := true
+			for colIdx, val := range searchCols {
+				cellVal := ""
+				if colIdx < len(row) {
+					cellVal = row[colIdx]
+				}
+				if cellVal != val {
+					match = false
+					break
+				}
+			}
+			if match {
+				// Tìm thấy -> Kiểm tra chất lượng
+				val := kiem_tra_chat_luong_clean(row, action)
+				if val.Valid {
+					targetIndex = i
+					sysEmail = val.SystemEmail
+					// Xác định type
+					st := row[INDEX_DATA_TIKTOK.STATUS]
+					if st == STATUS_READ.REGISTER || st == STATUS_READ.REGISTERING {
+						responseType = "register"
+					}
+					// Search xong -> Commit luôn (chiếm quyền nếu nick đó đang trống)
+					return commit_and_response(sid, deviceId, cacheData, targetIndex, responseType, sysEmail, action)
+				}
+			}
+		}
+		// Search thất bại
+		return nil, fmt.Errorf("Không tìm thấy tài khoản theo yêu cầu")
+	}
+
+	// --- 3. [OPTIMIZED] LẤY NICK MỚI (AUTO PICK) ---
+	// Thay vì quét toàn bộ bảng, ta chỉ quét các nhóm Status ưu tiên
+	if targetIndex == -1 && action != "view_only" {
+		isReset := false
+		if v, ok := body["is_reset"].(bool); ok && v {
+			isReset = true
+		}
+
+		// Lấy danh sách status cần kiểm tra theo thứ tự ưu tiên
+		priorities := getPriorityList(action, isReset)
+
+		for _, statusKey := range priorities {
+			// Lấy danh sách các dòng có status này từ Map (O(1))
+			candidateIndices := cacheData.StatusMap[statusKey]
+			
+			for _, idx := range candidateIndices {
+				// Kiểm tra DeviceID (Chỉ lấy nick trống)
+				// Truy cập thẳng vào RAM (O(1))
+				currentDev := ""
+				if idx < len(cacheData.RawValues) {
+					// Check trong CleanValues cho nhanh (đã load sẵn)
+					// Cột DeviceID là cột 2
+					if INDEX_DATA_TIKTOK.DEVICE_ID < len(cacheData.CleanValues[idx]) {
+						currentDev = cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID]
+					}
+				}
+
+				if currentDev == "" {
+					// Nick trống -> Kiểm tra chất lượng
+					val := kiem_tra_chat_luong_clean(cacheData.CleanValues[idx], action)
+					if val.Valid {
+						// 🔥 OPTIMISTIC LOCKING: Chiếm quyền ngay
+						STATE.SheetMutex.Lock()
+						// Double Check (Trong lock) để chắc chắn chưa ai lấy
+						doubleCheckDev := ""
+						if idx < len(cacheData.CleanValues) && INDEX_DATA_TIKTOK.DEVICE_ID < len(cacheData.CleanValues[idx]) {
+							doubleCheckDev = cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID]
+						}
+						
+						if doubleCheckDev == "" {
+							// Ghi tên mình vào RAM ngay lập tức
+							cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
+							cacheData.RawValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
+							
+							// Cập nhật AssignedMap để lần sau tìm cho nhanh
+							cacheData.AssignedMap[deviceId] = idx
+							
+							// (Tùy chọn) Xóa khỏi UnassignedList nếu muốn quản lý chặt hơn
+							// Nhưng vì ta dựa vào DeviceID == "" nên không cần thiết phải thao tác list đó lúc này.
+							
+							targetIndex = idx
+							sysEmail = val.SystemEmail
+							if statusKey == STATUS_READ.REGISTERING || statusKey == STATUS_READ.WAIT_REG || statusKey == STATUS_READ.REGISTER {
+								responseType = "register"
+							}
+							
+							STATE.SheetMutex.Unlock()
+							goto FOUND // Thoát 2 vòng lặp
+						}
+						STATE.SheetMutex.Unlock()
+					}
 				}
 			}
 		}
 	}
 
-	// --- 2. AUTO SEARCH MODE ---
-	prio := 0
-	if !isFast {
-		searchRes := xu_ly_tim_kiem(body, action, deviceId, cacheData, sid)
-		
-		targetIndex = searchRes.TargetIndex
-		responseType = searchRes.ResponseType
-		sysEmail = searchRes.SystemEmail
-		cleanupIndices = searchRes.CleanupIndices
-		prio = searchRes.BestPriority
-		
-		if len(searchRes.BadIndices) > 0 {
-			badIndices = append(badIndices, searchRes.BadIndices...)
-		}
-
-		if targetIndex == -1 {
-			if action != "view_only" && len(badIndices) > 0 {
-				xu_ly_ghi_loi(sid, badIndices)
-			}
-			return nil, fmt.Errorf("Không còn tài khoản phù hợp")
-		}
-		
-		targetData = allData[targetIndex]
+FOUND:
+	if targetIndex == -1 {
+		return nil, fmt.Errorf("Không còn tài khoản phù hợp")
 	}
 
-	// --- 3. VIEW ONLY ---
-	if action == "view_only" {
-		return buildResponse(targetData, targetIndex, responseType, "OK", deviceId, sysEmail), nil
-	}
+	// --- 4. TRẢ VỀ KẾT QUẢ ---
+	return commit_and_response(sid, deviceId, cacheData, targetIndex, responseType, sysEmail, action)
+}
 
-	// --- 4. CHECK & WRITE ---
-	curDev := CleanString(targetData[INDEX_DATA_TIKTOK.DEVICE_ID])
-	if curDev != deviceId && curDev != "" {
-		return nil, fmt.Errorf("Hệ thống bận (Nick vừa bị người khác lấy).")
-	}
-
+// 🟢 HELPER: Commit Data & Build Response
+func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, typ, email, action string) (*LoginResponse, error) {
+	row := cache.RawValues[idx]
+	
+	// Xác định trạng thái ghi
 	tSt := STATUS_WRITE.RUNNING
-	if responseType == "register" {
+	if typ == "register" {
 		tSt = STATUS_WRITE.REGISTERING
 	}
 
-	oldNote := SafeString(targetData[INDEX_DATA_TIKTOK.NOTE])
-	isResetAction := (prio == 5 || prio == 9)
+	// Xác định Note
+	oldNote := SafeString(row[INDEX_DATA_TIKTOK.NOTE])
 	mode := "normal"
-	if isResetAction { mode = "reset" }
+	// Nếu là Auto Reset (ưu tiên thấp nhất) -> mode reset
+	// Logic đơn giản: Nếu trạng thái cũ là Completed -> Reset
+	cleanSt := cache.CleanValues[idx][INDEX_DATA_TIKTOK.STATUS]
+	if cleanSt == STATUS_READ.COMPLETED {
+		mode = "reset"
+	}
 	
 	tNote := tao_ghi_chu_chuan(oldNote, tSt, mode)
 
-	newRow := make([]interface{}, len(targetData))
-	copy(newRow, targetData)
-	
-	newRow[INDEX_DATA_TIKTOK.STATUS] = tSt
-	newRow[INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
-	newRow[INDEX_DATA_TIKTOK.NOTE] = tNote
-
-	// Cập nhật RAM
+	// Update RAM (Values & Status Map)
 	STATE.SheetMutex.Lock()
-	cacheKey := sid + KEY_SEPARATOR + SHEET_NAMES.DATA_TIKTOK
-	if c, ok := STATE.SheetCache[cacheKey]; ok {
-		c.RawValues[targetIndex][INDEX_DATA_TIKTOK.STATUS] = tSt
-		c.RawValues[targetIndex][INDEX_DATA_TIKTOK.NOTE] = tNote
-		c.RawValues[targetIndex][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
-		
-		if INDEX_DATA_TIKTOK.STATUS < CACHE.CLEAN_COL_LIMIT {
-			c.CleanValues[targetIndex][INDEX_DATA_TIKTOK.STATUS] = CleanString(tSt)
-		}
-		if INDEX_DATA_TIKTOK.DEVICE_ID < CACHE.CLEAN_COL_LIMIT {
-			c.CleanValues[targetIndex][INDEX_DATA_TIKTOK.DEVICE_ID] = CleanString(deviceId)
-		}
+	
+	// 1. Update Values
+	cache.RawValues[idx][INDEX_DATA_TIKTOK.STATUS] = tSt
+	cache.RawValues[idx][INDEX_DATA_TIKTOK.NOTE] = tNote
+	cache.RawValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId // Đảm bảo chắc chắn
+	
+	// 2. Update Clean Values
+	if INDEX_DATA_TIKTOK.STATUS < CACHE.CLEAN_COL_LIMIT {
+		cache.CleanValues[idx][INDEX_DATA_TIKTOK.STATUS] = CleanString(tSt)
 	}
+	if INDEX_DATA_TIKTOK.NOTE < CACHE.CLEAN_COL_LIMIT {
+		cache.CleanValues[idx][INDEX_DATA_TIKTOK.NOTE] = CleanString(tNote)
+	}
+	
+	// 3. Update Status Map (Chuyển nhà cho index)
+	// Xóa khỏi bucket status cũ
+	if cleanSt != "" {
+		removeFromStatusMap(cache.StatusMap, cleanSt, idx)
+	}
+	// Thêm vào bucket status mới
+	newCleanSt := CleanString(tSt)
+	cache.StatusMap[newCleanSt] = append(cache.StatusMap[newCleanSt], idx)
+	
 	STATE.SheetMutex.Unlock()
 
-	QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, targetIndex, newRow)
-
-	if len(cleanupIndices) > 0 {
-		cSt := STATUS_WRITE.WAITING
-		if responseType == "register" {
-			cSt = STATUS_WRITE.WAIT_REG
-		}
-		
-		for _, i := range cleanupIndices {
-			if i == targetIndex { continue }
-			
-			oldN := SafeString(allData[i][INDEX_DATA_TIKTOK.NOTE])
-			cNote := ""
-			if isResetAction {
-				cNote = tao_ghi_chu_chuan(oldN, "Reset chờ chạy", "reset")
-			}
-			
-			cRow := make([]interface{}, len(allData[i]))
-			copy(cRow, allData[i])
-			cRow[INDEX_DATA_TIKTOK.STATUS] = cSt
-			cRow[INDEX_DATA_TIKTOK.NOTE] = cNote
-			
-			QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, i, cRow)
-		}
-	}
-
-	if len(badIndices) > 0 {
-		xu_ly_ghi_loi(sid, badIndices)
-	}
+	// Update Queue (Ghi xuống đĩa)
+	// Clone row để tránh race condition khi queue đọc
+	newRow := make([]interface{}, len(row))
+	copy(newRow, row)
+	QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, idx, newRow)
 
 	msg := "Lấy nick đăng nhập thành công"
-	if responseType == "register" {
+	if typ == "register" {
 		msg = "Lấy nick đăng ký thành công"
 	}
 
-	return buildResponse(newRow, targetIndex, responseType, msg, deviceId, sysEmail), nil
+	return &LoginResponse{
+		Status:          "true",
+		Type:            typ,
+		Messenger:       msg,
+		DeviceId:        deviceId,
+		RowIndex:        RANGES.DATA_START_ROW + idx,
+		SystemEmail:     email,
+		AuthProfile:     MakeAuthProfile(newRow),
+		ActivityProfile: MakeActivityProfile(newRow),
+		AiProfile:       MakeAiProfile(newRow),
+	}, nil
 }
 
-// Logic Search, Quality, GroupConfig... (Giữ nguyên như bản chuẩn)
-type SearchResult struct {
-	TargetIndex    int
-	ResponseType   string
-	SystemEmail    string
-	BestPriority   int
-	CleanupIndices []int
-	BadIndices     []map[string]interface{}
+// Helper: Xóa index khỏi slice trong map (cần tối ưu nếu list quá dài, nhưng tạm thời ok)
+func removeFromStatusMap(m map[string][]int, status string, targetIdx int) {
+	if list, ok := m[status]; ok {
+		for i, v := range list {
+			if v == targetIdx {
+				// Xóa phần tử i
+				m[status] = append(list[:i], list[i+1:]...)
+				return
+			}
+		}
+	}
 }
 
+func getPriorityList(action string, isReset bool) []string {
+	var list []string
+	
+	if strings.Contains(action, "login") {
+		list = append(list, STATUS_READ.RUNNING, STATUS_READ.WAITING, STATUS_READ.LOGIN)
+	} else if action == "register" {
+		list = append(list, STATUS_READ.REGISTERING, STATUS_READ.WAIT_REG, STATUS_READ.REGISTER)
+	} else if action == "auto" {
+		// Login trước, Register sau
+		list = append(list, STATUS_READ.RUNNING, STATUS_READ.WAITING, STATUS_READ.LOGIN)
+		list = append(list, STATUS_READ.REGISTERING, STATUS_READ.WAIT_REG, STATUS_READ.REGISTER)
+	}
+
+	if isReset {
+		list = append(list, STATUS_READ.COMPLETED)
+	}
+	return list
+}
+
+// Các hàm kiem_tra_chat_luong_clean, tao_ghi_chu_chuan giữ nguyên từ phiên bản trước
 type QualityResult struct {
 	Valid       bool
 	SystemEmail string
 	Missing     string
 }
 
-type GroupConfig struct {
-	Indices  []int
-	Type     string
-	Priority int
-	IsMy     bool
-}
-
-func xu_ly_tim_kiem(body map[string]interface{}, action, reqDevice string, cacheData *SheetCacheData, sid string) SearchResult {
-	cleanValues := cacheData.CleanValues
-	indices := cacheData.Indices
-	
-	s_uid := CleanString(body["search_user_id"])
-	s_email := CleanString(body["search_email"])
-	isSearchMode := (s_uid != "" || s_email != "")
-	
-	isReset := (action == "login_reset")
-	if val, ok := body["is_reset"].(bool); ok && val {
-		isReset = true
-	}
-
-	if isSearchMode {
-		idx := -1
-		if s_uid != "" {
-			if i, ok := indices["userId"][s_uid]; ok { idx = i }
-		} else if s_email != "" {
-			if i, ok := indices["email"][s_email]; ok { idx = i }
-		}
-
-		if idx != -1 {
-			st := cleanValues[idx][INDEX_DATA_TIKTOK.STATUS]
-			typ := "login"
-			if st == STATUS_READ.REGISTER || st == STATUS_READ.REGISTERING {
-				typ = "register"
-			}
-			val := kiem_tra_chat_luong_clean(cleanValues[idx], typ)
-			if val.Valid {
-				return SearchResult{
-					TargetIndex:    idx,
-					ResponseType:   typ,
-					SystemEmail:    val.SystemEmail,
-					CleanupIndices: lay_danh_sach_cleanup(cleanValues, indices, reqDevice, false, idx),
-				}
-			} else {
-				return SearchResult{TargetIndex: -1, BadIndices: []map[string]interface{}{{"index": idx, "msg": "Thiếu " + val.Missing}}}
-			}
-		}
-		return SearchResult{TargetIndex: -1}
-	}
-
-	var groups []GroupConfig
-	getIdx := func(st string) []int {
-		if list, ok := cacheData.StatusIndices[st]; ok { return list }
-		return []int{}
-	}
-
-	completedIndices := getIdx(STATUS_READ.COMPLETED)
-
-	if strings.Contains(action, "login") {
-		groups = append(groups, GroupConfig{getIdx(STATUS_READ.RUNNING), "login", 1, true})
-		groups = append(groups, GroupConfig{getIdx(STATUS_READ.WAITING), "login", 2, true})
-		groups = append(groups, GroupConfig{getIdx(STATUS_READ.LOGIN), "login", 3, true})
-		groups = append(groups, GroupConfig{getIdx(STATUS_READ.LOGIN), "login", 4, false})
-		if isReset {
-			groups = append(groups, GroupConfig{completedIndices, "login", 5, true})
-		}
-	} else if action == "register" {
-		groups = append(groups, GroupConfig{getIdx(STATUS_READ.REGISTERING), "register", 1, true})
-		groups = append(groups, GroupConfig{getIdx(STATUS_READ.WAIT_REG), "register", 2, true})
-		groups = append(groups, GroupConfig{getIdx(STATUS_READ.REGISTER), "register", 3, true})
-		groups = append(groups, GroupConfig{getIdx(STATUS_READ.REGISTER), "register", 4, false})
-	} else if action == "auto" {
-		groups = append(groups, GroupConfig{getIdx(STATUS_READ.RUNNING), "login", 1, true})
-		groups = append(groups, GroupConfig{getIdx(STATUS_READ.WAITING), "login", 2, true})
-		groups = append(groups, GroupConfig{getIdx(STATUS_READ.LOGIN), "login", 3, true})
-		groups = append(groups, GroupConfig{getIdx(STATUS_READ.LOGIN), "login", 4, false})
-		groups = append(groups, GroupConfig{getIdx(STATUS_READ.REGISTERING), "register", 5, true})
-		groups = append(groups, GroupConfig{getIdx(STATUS_READ.WAIT_REG), "register", 6, true})
-		groups = append(groups, GroupConfig{getIdx(STATUS_READ.REGISTER), "register", 7, true})
-		groups = append(groups, GroupConfig{getIdx(STATUS_READ.REGISTER), "register", 8, false})
-		if isReset {
-			groups = append(groups, GroupConfig{completedIndices, "login", 9, true})
-		}
-	}
-
-	bestIndex := -1
-	bestPriority := 999
-	bestType := "login"
-	bestSystemEmail := ""
-	var badIndices []map[string]interface{}
-
-	for _, g := range groups {
-		if g.Priority >= bestPriority { continue }
-		for _, i := range g.Indices {
-			row := cleanValues[i]
-			curDev := row[INDEX_DATA_TIKTOK.DEVICE_ID]
-			isMy := (curDev == reqDevice)
-			isNoDev := (curDev == "")
-
-			if (g.IsMy && isMy) || (!g.IsMy && isNoDev) {
-				val := kiem_tra_chat_luong_clean(row, g.Type)
-				if !val.Valid {
-					badIndices = append(badIndices, map[string]interface{}{"index": i, "msg": "Thiếu " + val.Missing})
-					continue
-				}
-
-				if isMy {
-					bestIndex = i
-					bestPriority = g.Priority
-					bestType = g.Type
-					bestSystemEmail = val.SystemEmail
-					break
-				} else if isNoDev {
-					STATE.SheetMutex.Lock()
-					if cacheData.CleanValues[i][INDEX_DATA_TIKTOK.DEVICE_ID] == "" {
-						cacheData.CleanValues[i][INDEX_DATA_TIKTOK.DEVICE_ID] = reqDevice
-						cacheData.RawValues[i][INDEX_DATA_TIKTOK.DEVICE_ID] = reqDevice
-						bestIndex = i
-						bestPriority = g.Priority
-						bestType = g.Type
-						bestSystemEmail = val.SystemEmail
-						STATE.SheetMutex.Unlock()
-						break
-					}
-					STATE.SheetMutex.Unlock()
-				}
-			}
-		}
-		if bestIndex != -1 { break }
-	}
-
-	cleanupIndices := []int{}
-	if bestIndex != -1 {
-		isResetCompleted := (bestPriority == 5 || bestPriority == 9)
-		cleanupIndices = lay_danh_sach_cleanup(cleanValues, cacheData.Indices, reqDevice, isResetCompleted, bestIndex)
-	}
-
-	return SearchResult{TargetIndex: bestIndex, ResponseType: bestType, SystemEmail: bestSystemEmail, BestPriority: bestPriority, CleanupIndices: cleanupIndices, BadIndices: badIndices}
-}
-
 func kiem_tra_chat_luong_clean(cleanRow []string, action string) QualityResult {
+	if len(cleanRow) <= INDEX_DATA_TIKTOK.EMAIL {
+		return QualityResult{false, "", "data_length"}
+	}
 	rawEmail := cleanRow[INDEX_DATA_TIKTOK.EMAIL]
 	sysEmail := ""
 	if strings.Contains(rawEmail, "@") {
@@ -426,27 +379,6 @@ func kiem_tra_chat_luong_clean(cleanRow []string, action string) QualityResult {
 		return QualityResult{false, "", "data"}
 	}
 	return QualityResult{false, "", "unknown"}
-}
-
-func lay_danh_sach_cleanup(cleanValues [][]string, indices map[string]map[string]int, reqDevice string, isReset bool, target int) []int {
-	list := make([]int, 0)
-	checkSt := []string{STATUS_READ.RUNNING, STATUS_READ.REGISTERING}
-	if isReset {
-		checkSt = append(checkSt, STATUS_READ.COMPLETED)
-	}
-	for i, row := range cleanValues {
-		if i == target { continue }
-		if row[INDEX_DATA_TIKTOK.DEVICE_ID] == reqDevice {
-			st := row[INDEX_DATA_TIKTOK.STATUS]
-			for _, c := range checkSt {
-				if st == c {
-					list = append(list, i)
-					break
-				}
-			}
-		}
-	}
-	return list
 }
 
 func tao_ghi_chu_chuan(oldNote, newStatus, mode string) string {
@@ -491,26 +423,4 @@ func tao_ghi_chu_chuan(oldNote, newStatus, mode string) string {
 		if mode == "reset" { count++ } else if count == 0 { count = 1 }
 	}
 	return fmt.Sprintf("%s\n%s (Lần %d)", newStatus, nowFull, count)
-}
-
-func xu_ly_ghi_loi(sid string, badIndices []map[string]interface{}) {
-	for _, item := range badIndices {
-		idx := item["index"].(int)
-		msg := item["msg"].(string)
-		fmt.Printf("⚠️ [BAD NICK] Index %d: %s\n", idx, msg)
-	}
-}
-
-func buildResponse(row []interface{}, idx int, typ, msg, devId, email string) *LoginResponse {
-	return &LoginResponse{
-		Status:          "true",
-		Type:            typ,
-		Messenger:       msg,
-		DeviceId:        devId,
-		RowIndex:        RANGES.DATA_START_ROW + idx,
-		SystemEmail:     email,
-		AuthProfile:     MakeAuthProfile(row),
-		ActivityProfile: MakeActivityProfile(row),
-		AiProfile:       MakeAiProfile(row),
-	}
 }
