@@ -15,40 +15,40 @@ func main() {
 	fmt.Println("🚀 [STARTUP] Starting System V243...")
 
 	rawCred := os.Getenv("FIREBASE_CREDENTIALS")
-	if rawCred == "" {
-		log.Fatal("❌ [CRITICAL] Missing FIREBASE_CREDENTIALS env var.")
-	}
-
 	var credJSON []byte
-	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(rawCred))
-	if err == nil && len(decoded) > 0 && strings.Contains(string(decoded), "{") {
-		fmt.Println("✅ [INFO] Detected & Decoded Base64 Credentials.")
-		credJSON = decoded
+
+	// 🔥 FIX: Không Fatal nếu thiếu biến môi trường, chỉ Warn
+	if rawCred == "" {
+		fmt.Println("⚠️ [WARN] Missing FIREBASE_CREDENTIALS env var. System will start in limited mode.")
 	} else {
-		start := strings.Index(rawCred, "{")
-		end := strings.LastIndex(rawCred, "}")
-		if start != -1 && end != -1 && end > start {
-			credJSON = []byte(rawCred[start : end+1])
-			fmt.Println("✅ [INFO] Extracted valid JSON content.")
+		fmt.Printf("ℹ️ [INFO] Raw Env Length: %d\n", len(rawCred))
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(rawCred))
+		if err == nil && len(decoded) > 0 && strings.Contains(string(decoded), "{") {
+			fmt.Println("✅ [INFO] Detected & Decoded Base64 Credentials.")
+			credJSON = decoded
 		} else {
-			credJSON = []byte(rawCred)
+			start := strings.Index(rawCred, "{")
+			end := strings.LastIndex(rawCred, "}")
+			if start != -1 && end != -1 && end > start {
+				jsonContent := rawCred[start : end+1]
+				fmt.Println("✅ [INFO] Extracted valid JSON content.")
+				credJSON = []byte(jsonContent)
+			} else {
+				fmt.Println("⚠️ [WARN] Raw JSON might be invalid.")
+				credJSON = []byte(rawCred)
+			}
 		}
 	}
 
-	// 🔥 FIX: Gọi đúng tên hàm InitAuthService (file service_auth.go)
-	fmt.Println("🔄 [INIT] Connecting to Firebase...")
+	fmt.Println("🔄 [INIT] Connecting to Services...")
+	// 🔥 Dù credJSON rỗng vẫn gọi hàm init, hàm init mới (ở trên) sẽ xử lý an toàn
 	InitAuthService(credJSON) 
-	
-	fmt.Println("🔄 [INIT] Connecting to Google Sheets...")
 	InitGoogleService(credJSON)
 
 	mux := http.NewServeMux()
 	
-	// Middleware CORS & Auth
-	// Logic: EnableCORS -> AuthMiddleware -> Handler
 	wrap := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			// CORS
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
@@ -56,12 +56,10 @@ func main() {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
-			// Auth
 			AuthMiddleware(http.HandlerFunc(h)).ServeHTTP(w, r)
 		}
 	}
 
-	// 🔥 Các hàm này giờ đã có trong handler_login.go, handler_update.go, handler_extra.go
 	mux.HandleFunc("/tool/login", wrap(HandleAccountAction))
 	mux.HandleFunc("/tool/updated", wrap(HandleUpdateData))
 	mux.HandleFunc("/tool/search", wrap(HandleSearchData))
@@ -69,6 +67,12 @@ func main() {
 	mux.HandleFunc("/tool/read-mail", wrap(HandleReadMail))
 	mux.HandleFunc("/tool/create-sheets", wrap(HandleCreateSheets))
 	mux.HandleFunc("/tool/updated-cache", wrap(HandleClearCache))
+
+	// Health Check
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("TikTok System Go V243 is Ready!"))
+	})
 
 	port := os.Getenv("PORT")
 	if port == "" { port = "8080" }
@@ -78,7 +82,7 @@ func main() {
 	go func() {
 		fmt.Printf("✅ [READY] Server listening on port %s\n", port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("❌ [SERVER ERROR] %v", err)
+			log.Printf("❌ [SERVER ERROR] %v", err) // Printf thay vì Fatal
 		}
 	}()
 
@@ -87,7 +91,6 @@ func main() {
 	<-quit
 
 	fmt.Println("🛑 [SIGTERM] Shutting down...")
-	// Flush logic
 	STATE.QueueMutex.Lock()
 	for sid := range STATE.WriteQueue { FlushQueue(sid, true) }
 	STATE.QueueMutex.Unlock()
