@@ -1,21 +1,26 @@
 # ==========================================
 # STAGE 1: Build (Biên dịch code)
 # ==========================================
-FROM golang:1.22-alpine AS builder
+# Dùng bản alpine mới nhất (thường là Go 1.23+) để tối ưu tương thích
+FROM golang:alpine AS builder
 
 # Cài đặt git
 RUN apk add --no-cache git
 
 WORKDIR /app
 
-# 🔴 THAY ĐỔI QUAN TRỌNG:
-# Copy TOÀN BỘ mã nguồn vào trước (bao gồm go.mod, main.go, folder handlers...)
+# Copy TOÀN BỘ mã nguồn vào trước
 COPY . .
 
-# Sau khi có code, chạy lệnh này để nó quét các file .go và tự động tải thư viện thiếu
+# 🔥 FIX LỖI VERSION:
+# Ép xuống phiên bản Firestore ổn định tương thích với Go hiện tại
+# (Tránh bản v1.21.0 yêu cầu Go 1.24 gây lỗi)
+RUN go get cloud.google.com/go/firestore@v1.19.0
+
+# Sau đó mới chạy tidy để dọn dẹp và tải các thư viện khác
 RUN go mod tidy
 
-# Tải dependencies về
+# Tải dependencies
 RUN go mod download
 
 # Build file thực thi
