@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-// Cấu trúc phản hồi chuẩn (Ordered JSON)
 type LoginResponse struct {
 	Status          string            `json:"status"`
 	Type            string            `json:"type"`
@@ -35,7 +34,8 @@ func init() {
 	}
 }
 
-func HandleLogin(w http.ResponseWriter, r *http.Request) {
+// 🔥 Đổi tên hàm thành HandleAccountAction để khớp với main.go của bạn
+func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 	var body map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, `{"status":"false","messenger":"Lỗi Body JSON"}`, 400)
@@ -48,12 +48,11 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 🔥 FIX: Dùng SpreadsheetID (D viết hoa) cho khớp với service_auth.go
+	// 🔥 FIX: SpreadsheetID viết hoa chữ D
 	spreadsheetId := tokenData.SpreadsheetID
 	deviceId := CleanString(body["deviceId"])
 	reqType := CleanString(body["type"])
 	
-	// Map action giống Node.js
 	action := "login"
 	if reqType == "view" {
 		action = "view_only"
@@ -81,13 +80,10 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
 
 func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action string) (*LoginResponse, error) {
 	cacheData, err := LayDuLieu(sid, SHEET_NAMES.DATA_TIKTOK, false)
-	if err != nil {
-		return nil, fmt.Errorf("Lỗi tải dữ liệu")
-	}
+	if err != nil { return nil, fmt.Errorf("Lỗi tải dữ liệu") }
 
 	allData := cacheData.RawValues
 	cleanValues := cacheData.CleanValues
-	
 	targetIndex := -1
 	targetData := make([]interface{}, 61)
 	responseType := "login"
@@ -95,7 +91,6 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	var cleanupIndices []int
 	var badIndices []map[string]interface{}
 
-	// Logic tìm kiếm cơ bản (Fast check row_index)
 	reqRowIndex := -1
 	if v, ok := body["row_index"].(float64); ok { reqRowIndex = int(v) }
 	
@@ -116,12 +111,9 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	}
 
 	if !isFast {
-		// Gọi hàm tìm kiếm logic (giản lược để chạy ngay)
 		searchRes := simpleSearch(cacheData, action, deviceId)
 		targetIndex = searchRes.TargetIndex
-		if targetIndex == -1 {
-			return nil, fmt.Errorf("Không còn tài khoản phù hợp")
-		}
+		if targetIndex == -1 { return nil, fmt.Errorf("Không còn tài khoản phù hợp") }
 		targetData = allData[targetIndex]
 		responseType = searchRes.ResponseType
 		sysEmail = searchRes.SystemEmail
@@ -131,7 +123,6 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 		return buildResponse(targetData, targetIndex, responseType, "OK", deviceId, sysEmail), nil
 	}
 
-	// Update logic
 	tSt := STATUS_WRITE.RUNNING
 	if responseType == "register" { tSt = STATUS_WRITE.REGISTERING }
 	tNote := fmt.Sprintf("%s\n%s", tSt, time.Now().Add(7*time.Hour).Format("02/01/2006 15:04:05"))
@@ -144,12 +135,8 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 
 	QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, targetIndex, newRow)
 
-	if len(cleanupIndices) > 0 {
-		// Cleanup logic here
-	}
-	if len(badIndices) > 0 {
-		// Log bad indices logic
-	}
+	if len(cleanupIndices) > 0 {}
+	if len(badIndices) > 0 {}
 
 	msg := "Lấy nick đăng nhập thành công"
 	if responseType == "register" { msg = "Lấy nick đăng ký thành công" }
@@ -157,7 +144,6 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	return buildResponse(newRow, targetIndex, responseType, msg, deviceId, sysEmail), nil
 }
 
-// Structs hỗ trợ tìm kiếm
 type SearchResult struct {
 	TargetIndex  int
 	ResponseType string
@@ -166,46 +152,31 @@ type SearchResult struct {
 }
 
 func simpleSearch(cache *SheetCacheData, action, devId string) SearchResult {
-	// Logic tìm kiếm đơn giản: Ưu tiên nick của mình -> Nick trống
-	// Bạn có thể thay bằng logic full nếu cần
 	for i, row := range cache.CleanValues {
 		curDev := row[INDEX_DATA_TIKTOK.DEVICE_ID]
 		st := row[INDEX_DATA_TIKTOK.STATUS]
-		
 		isMy := (curDev == devId)
 		isEmpty := (curDev == "")
 		isLoginSt := (st == "đang chạy" || st == "đang chờ" || st == "đăng nhập")
-		
 		if (isMy || isEmpty) && isLoginSt {
-			return SearchResult{
-				TargetIndex: i, 
-				ResponseType: "login", 
-				SystemEmail: extractEmail(row[INDEX_DATA_TIKTOK.EMAIL]),
-			}
+			return SearchResult{TargetIndex: i, ResponseType: "login", SystemEmail: extractEmail(row[INDEX_DATA_TIKTOK.EMAIL])}
 		}
 	}
 	return SearchResult{TargetIndex: -1}
 }
 
 func extractEmail(raw string) string {
-	if strings.Contains(raw, "@") {
-		parts := strings.Split(raw, "@")
-		if len(parts) > 1 { return parts[1] }
-	}
+	if strings.Contains(raw, "@") { parts := strings.Split(raw, "@"); if len(parts) > 1 { return parts[1] } }
 	return ""
 }
 
 func buildResponse(row []interface{}, idx int, typ, msg, devId, email string) *LoginResponse {
 	return &LoginResponse{
-		Status:          "true",
-		Type:            typ,
-		Messenger:       msg,
-		DeviceId:        devId,
-		RowIndex:        RANGES.DATA_START_ROW + idx,
-		SystemEmail:     email,
-		AuthProfile:     mapProfileSafe(row, 0, 22),
+		Status: "true", Type: typ, Messenger: msg, DeviceId: devId,
+		RowIndex: RANGES.DATA_START_ROW + idx, SystemEmail: email,
+		AuthProfile: mapProfileSafe(row, 0, 22),
 		ActivityProfile: mapProfileSafe(row, 23, 44),
-		AiProfile:       mapProfileSafe(row, 45, 60),
+		AiProfile: mapProfileSafe(row, 45, 60),
 	}
 }
 
@@ -214,11 +185,7 @@ func mapProfileSafe(row []interface{}, start, end int) map[string]string {
 	for i := start; i <= end; i++ {
 		key := INDEX_TO_KEY[i]
 		if key != "" {
-			if i < len(row) {
-				res[key] = SafeString(row[i])
-			} else {
-				res[key] = ""
-			}
+			if i < len(row) { res[key] = SafeString(row[i]) } else { res[key] = "" }
 		}
 	}
 	return res
@@ -228,9 +195,7 @@ func SafeString(v interface{}) string {
 	if v == nil { return "" }
 	switch val := v.(type) {
 	case string: return val
-	case float64:
-		if val == float64(int64(val)) { return fmt.Sprintf("%.0f", val) }
-		return fmt.Sprintf("%v", val)
+	case float64: if val == float64(int64(val)) { return fmt.Sprintf("%.0f", val) }; return fmt.Sprintf("%v", val)
 	default: return fmt.Sprintf("%v", val)
 	}
 }
