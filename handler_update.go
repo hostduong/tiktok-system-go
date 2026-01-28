@@ -11,7 +11,6 @@ func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 	var body map[string]interface{}
 	json.NewDecoder(r.Body).Decode(&body)
 
-	[cite_start]// [cite: 289-291]
 	token, _ := body["token"].(string)
 	auth := CheckToken(token)
 	if !auth.IsValid {
@@ -38,7 +37,6 @@ func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 	searchCols := make(map[int]string)
 	updateCols := make(map[int]interface{})
 
-	[cite_start]// Parse body keys [cite: 292-294]
 	for k, v := range body {
 		if len(k) > 11 && k[:11] == "search_col_" {
 			idx, _ := strconv.Atoi(k[11:])
@@ -52,11 +50,10 @@ func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 	targetIndex := -1
 	isAppend := false
 
-	[cite_start]// Logic tìm dòng [cite: 295-304]
+	// Logic tìm dòng
 	if rowIndexInput > 0 {
 		idx := rowIndexInput - RANGES.DATA_START_ROW
 		if idx >= 0 {
-			// Check search cols (Verify data match)
 			match := true
 			cache.Mutex.RLock()
 			if idx < len(cache.RawValues) {
@@ -78,7 +75,6 @@ func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else if len(searchCols) > 0 {
-		// Scan tìm kiếm (Fallback khi không có row_index)
 		cache.Mutex.RLock()
 		for i := 0; i < len(cache.RawValues); i++ {
 			match := true
@@ -102,13 +98,12 @@ func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 		isAppend = true
 	}
 
-	[cite_start]// Logic Update/Append [cite: 305-318]
+	// Logic Update/Append
 	newRow := make([]interface{}, 61)
 	oldNote := ""
 	
-	cache.Mutex.Lock() // Lock ghi
+	cache.Mutex.Lock()
 	if !isAppend {
-		// Copy dòng cũ
 		if targetIndex < len(cache.RawValues) {
 			copy(newRow, cache.RawValues[targetIndex])
 			if sheetName == SHEET_NAMES.DATA_TIKTOK {
@@ -117,12 +112,10 @@ func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
-	// Apply updates
 	for col, val := range updateCols {
 		if col < 61 { newRow[col] = val }
 	}
 	
-	// Logic Note
 	if sheetName == SHEET_NAMES.DATA_TIKTOK {
 		noteContent, _ := body["note"].(string)
 		if noteContent == "" { noteContent, _ = updateCols[INDEX_DATA_TIKTOK.NOTE].(string) }
@@ -134,11 +127,8 @@ func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 		newRow[INDEX_DATA_TIKTOK.NOTE] = newNote
 	}
 	
-	// Commit RAM & Queue
 	if isAppend {
 		cache.RawValues = append(cache.RawValues, newRow)
-		// Lưu ý: Logic thêm vào CleanValues và Indices nên được thực hiện đầy đủ nếu cần tìm kiếm ngay
-		// Ở đây tối giản để tập trung vào luồng chính.
 		cache.Mutex.Unlock()
 		
 		QueueAppend(sid, sheetName, [][]interface{}{newRow})
@@ -150,7 +140,6 @@ func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 		})
 	} else {
 		cache.RawValues[targetIndex] = newRow
-		// Lưu ý: Cần update lại CleanValues tại index tương ứng
 		if INDEX_DATA_TIKTOK.STATUS < CACHE.CLEAN_COL_LIMIT {
 			cache.CleanValues[targetIndex][INDEX_DATA_TIKTOK.STATUS] = CleanString(newRow[INDEX_DATA_TIKTOK.STATUS])
 		}
@@ -167,23 +156,18 @@ func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-[cite_start]// Xử lý /tool/create-sheets [cite: 405-422]
 func HandleCreateSheets(w http.ResponseWriter, r *http.Request) {
-	// Giữ nguyên logic copy từ master
 	json.NewEncoder(w).Encode(map[string]string{"status": "true", "messenger": "Sheets dữ liệu đã được tạo"})
 }
 
-[cite_start]// Xử lý /tool/updated-cache (Clear Cache) [cite: 423-428]
 func HandleClearCache(w http.ResponseWriter, r *http.Request) {
 	var body map[string]string
 	json.NewDecoder(r.Body).Decode(&body)
 	auth := CheckToken(body["token"])
 	if !auth.IsValid { return }
 
-	// Force Flush
 	FlushQueue(auth.SpreadsheetID, true)
 	
-	// Clear RAM
 	STATE.SheetMutex.Lock()
 	for k := range STATE.SheetCache {
 		if len(k) > len(auth.SpreadsheetID) && k[:len(auth.SpreadsheetID)] == auth.SpreadsheetID {
