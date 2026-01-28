@@ -16,8 +16,9 @@ import (
 )
 
 var firebaseDB *db.Client
-var AuthInitError error // 🔥 Biến lưu lỗi khởi động
+var AuthInitError error
 
+// InitAuthService: Khởi tạo Firebase
 func InitAuthService(credJSON []byte) {
 	if len(credJSON) == 0 {
 		AuthInitError = fmt.Errorf("Credential Data is empty")
@@ -28,6 +29,7 @@ func InitAuthService(credJSON []byte) {
 	ctx := context.Background()
 	opt := option.WithCredentialsJSON(credJSON)
 	
+	// URL này lúc chiều chạy được, giữ nguyên
 	conf := &firebase.Config{
 		DatabaseURL: "https://hostduong-1991-default-rtdb.asia-southeast1.firebasedatabase.app",
 	}
@@ -35,14 +37,14 @@ func InitAuthService(credJSON []byte) {
 	app, err := firebase.NewApp(ctx, conf, opt)
 	if err != nil {
 		AuthInitError = fmt.Errorf("Firebase Init Error: %v", err)
-		log.Println("❌ [AUTH INIT] " + AuthInitError.Error()) // 🔥 Chỉ in log, KHÔNG Fatal
+		log.Println("❌ [AUTH INIT] " + AuthInitError.Error())
 		return
 	}
 
 	client, err := app.Database(ctx)
 	if err != nil {
 		AuthInitError = fmt.Errorf("Firebase DB Error: %v", err)
-		log.Println("❌ [AUTH INIT] " + AuthInitError.Error()) // 🔥 Chỉ in log, KHÔNG Fatal
+		log.Println("❌ [AUTH INIT] " + AuthInitError.Error())
 		return
 	}
 
@@ -50,24 +52,26 @@ func InitAuthService(credJSON []byte) {
 	fmt.Println("✅ Firebase Service initialized (V4).")
 }
 
+// AuthMiddleware: Middleware kiểm tra token
 func AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 🔥 Nếu Firebase lỗi lúc khởi động, báo lỗi ngay cho client biết
 		if AuthInitError != nil {
 			http.Error(w, `{"status":"false","messenger":"Server Config Error: `+AuthInitError.Error()+`"}`, 500)
 			return
 		}
 		if firebaseDB == nil {
-			http.Error(w, `{"status":"false","messenger":"Server Connecting to Database... Try again."}`, 503)
+			http.Error(w, `{"status":"false","messenger":"Database Connecting... Try again."}`, 503)
 			return
 		}
 
+		// Đọc Body
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, `{"status":"false","messenger":"Read Body Error"}`, 400)
 			return
 		}
 		
+		// Trả lại Body cho Handler sau
 		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
 		var bodyMap map[string]interface{}
@@ -78,6 +82,7 @@ func AuthMiddleware(next http.Handler) http.Handler {
 
 		tokenStr := CleanString(bodyMap["token"])
 		
+		// Gọi hàm CheckToken
 		authRes := CheckToken(tokenStr)
 		if !authRes.IsValid {
 			w.Header().Set("Content-Type", "application/json")
@@ -85,6 +90,7 @@ func AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Lưu vào Context
 		ctx := context.WithValue(r.Context(), "tokenData", &TokenData{
 			Token:         tokenStr,
 			SpreadsheetID: authRes.SpreadsheetID,
@@ -95,28 +101,42 @@ func AuthMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// CheckToken: Logic kiểm tra Token (QUAY VỀ BẢN CHUẨN)
 func CheckToken(token string) AuthResult {
-	// 🔥 Check an toàn: Nếu DB chưa kết nối thì trả về lỗi luôn, tránh Panic
 	if firebaseDB == nil {
 		return AuthResult{IsValid: false, Messenger: "Database chưa sẵn sàng"}
 	}
 
-	if token == "" || len(token) < 50 {
+	if token == "" || len(token) < 10 {
 		return AuthResult{IsValid: false, Messenger: "Token không hợp lệ"}
 	}
 
-	ref := firebaseDB.NewRef("TOKEN_TIKTOK/" + token)
+	// 🔥 QUAN TRỌNG: Đọc về map[string]interface{} thay vì Struct cứng
+	// Điều này giúp code linh hoạt với mọi kiểu dữ liệu JSON trả về
 	var data map[string]interface{}
-	if err := ref.Get(context.Background(), &data); err != nil || data == nil {
+	ref := firebaseDB.NewRef("TOKEN_TIKTOK/" + token)
+	
+	if err := ref.Get(context.Background(), &data); err != nil {
+		log.Printf("❌ Firebase Error: %v", err)
+		return AuthResult{IsValid: false, Messenger: "Lỗi kết nối Database"}
+	}
+
+	if data == nil {
 		return AuthResult{IsValid: false, Messenger: "Token không tồn tại"}
 	}
 
+	// Kiểm tra các trường bắt buộc
 	if data["expired"] == nil || data["spreadsheetId"] == nil {
-		return AuthResult{IsValid: false, Messenger: "Token lỗi data"}
+		return AuthResult{IsValid: false, Messenger: "Token lỗi data (Thiếu expired/spreadsheetId)"}
 	}
 
+	// Xử lý ngày hết hạn
 	expStr := fmt.Sprintf("%v", data["expired"])
 	expTime := parseExpirationTime(expStr)
+	
+	// Debug Log nhẹ để kiểm tra
+	// log.Printf("Token Check: %s | Exp: %v | ID: %v", token[:10]+"...", expTime, data["spreadsheetId"])
+
 	if time.Now().After(expTime) {
 		return AuthResult{IsValid: false, Messenger: "Token hết hạn"}
 	}
@@ -129,6 +149,7 @@ func parseExpirationTime(dateStr string) time.Time {
 	layout := "02/01/2006"
 	t, err := time.Parse(layout, dateStr)
 	if err != nil {
+		// Fallback 1 ngày nếu lỗi format (để tránh chặn sai)
 		return time.Now().Add(24 * time.Hour)
 	}
 	return t.Add(23*time.Hour + 59*time.Minute)
