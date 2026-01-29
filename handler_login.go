@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-// Dùng Struct tường minh thay vì map
 type LoginResponse struct {
 	Status          string          `json:"status"`
 	Type            string          `json:"type"`
@@ -41,15 +40,18 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 	reqType := CleanString(body["type"])
 	
 	action := "login"
-	if reqType == "view" { action = "view_only" }
-	if reqType == "auto" {
+	if reqType == "view" { 
+		action = "view_only" 
+	} else if reqType == "auto" {
 		action = "auto"
 		if reqAction, _ := body["action"].(string); CleanString(reqAction) == "reset" {
 			body["is_reset"] = true
 		}
+	} else if reqType == "register" { 
+		action = "register" 
+	} else if reqAction, _ := body["action"].(string); CleanString(reqAction) == "reset" { 
+		action = "login_reset" 
 	}
-	if reqType == "register" { action = "register" }
-	if reqAction, _ := body["action"].(string); CleanString(reqAction) == "reset" { action = "login_reset" }
 
 	res, err := xu_ly_lay_du_lieu(sid, deviceId, body, action)
 	
@@ -67,14 +69,17 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 
 	rowIndexInput := -1
 	if v, ok := body["row_index"]; ok {
+		// Dùng toFloat từ utils.go
 		if val, ok := toFloat(v); ok { rowIndexInput = int(val) }
 	}
 
 	searchCols := make(map[int]string)
 	for k, v := range body {
 		if strings.HasPrefix(k, "search_col_") {
-			if i, err := strconv.Atoi(strings.TrimPrefix(k, "search_col_")); err == nil {
-				searchCols[i] = CleanString(v)
+			if idxStr := strings.TrimPrefix(k, "search_col_"); idxStr != "" {
+				if i, err := strconv.Atoi(idxStr); err == nil {
+					searchCols[i] = CleanString(v)
+				}
 			}
 		}
 	}
@@ -95,7 +100,8 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 				}
 			}
 			if match {
-				val := kiem_tra_chat_luong_clean(cleanRow, action)
+				// Gọi hàm từ utils.go
+				val := KiemTraChatLuongClean(cleanRow, action)
 				if val.Valid {
 					STATE.SheetMutex.RUnlock()
 					return commit_and_response(sid, deviceId, cacheData, idx, determineType(cleanRow), val.SystemEmail, action, 0)
@@ -112,7 +118,7 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 				if cIdx >= len(row) || row[cIdx] != val { match = false; break }
 			}
 			if match {
-				val := kiem_tra_chat_luong_clean(row, action)
+				val := KiemTraChatLuongClean(row, action)
 				if val.Valid {
 					curDev := row[INDEX_DATA_TIKTOK.DEVICE_ID]
 					if curDev == "" || curDev == deviceId {
@@ -133,7 +139,6 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	// C. UNIFIED PRIORITY LOOP
 	if action != "view_only" {
 		isReset := false
-		// 🔥 FIX LOGIC RESET: Kiểm tra cả action login_reset
 		if v, ok := body["is_reset"].(bool); ok && v { isReset = true }
 		if action == "login_reset" { isReset = true }
 
@@ -141,7 +146,6 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 		
 		for _, step := range steps {
 			indices := cacheData.StatusMap[step.Status]
-			
 			for _, idx := range indices {
 				if idx < rawLen {
 					row := cacheData.CleanValues[idx]
@@ -151,7 +155,7 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 					isEmptyNick := (curDev == "")
 					
 					if (step.IsMy && isMyNick) || (step.IsEmpty && isEmptyNick) {
-						val := kiem_tra_chat_luong_clean(row, action)
+						val := KiemTraChatLuongClean(row, action)
 						
 						if !val.Valid {
 							STATE.SheetMutex.RUnlock()
@@ -388,12 +392,7 @@ func tao_ghi_chu_chuan(oldNote, newStatus, mode string) string {
 
 	today := nowFull[:10]
 	oldDate := ""
-	for _, l := range lines {
-		if len(l) >= 10 && strings.Contains(l, "/") {
-			oldDate = l[:10]
-			break
-		}
-	}
+	for _, l := range lines { if len(l) >= 10 && strings.Contains(l, "/") { oldDate = l[:10]; break } }
 	
 	if oldDate != today { 
 		count = 1 
