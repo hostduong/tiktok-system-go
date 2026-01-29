@@ -18,43 +18,39 @@ func SafeString(v interface{}) string {
 	return strings.TrimSpace(fmt.Sprintf("%v", v))
 }
 
-// 🔥 Hàm xử lý ngày tháng (Dùng cho Search & Mail)
+// 🔥 HÀM QUAN TRỌNG: ConvertSerialDate (Port 100% từ Node.js chuyen_doi_thoi_gian)
+// Fix lỗi undefined trong handler_mail.go và handler_search.go
 func ConvertSerialDate(v interface{}) int64 {
-	s := fmt.Sprintf("%v", v)
+	if v == nil { return 0 }
 	
-	// 1. Chuỗi ngày tháng
-	if strings.Contains(s, "/") {
-		// Thử có giờ
-		if t, err := time.ParseInLocation("02/01/2006 15:04:05", s, time.FixedZone("UTC+7", 7*3600)); err == nil {
-			return t.UnixMilli()
-		}
-		// Thử chỉ ngày
-		if t, err := time.ParseInLocation("02/01/2006", s, time.FixedZone("UTC+7", 7*3600)); err == nil {
-			return t.UnixMilli()
-		}
-	}
-
-	// 2. Số Serial Excel
-	val := 0.0
+	// Case 1: Số (Excel Serial Date)
+	// Node.js logic: (v - 25569) * 86400000 - (7 * 3600000)
 	if f, ok := v.(float64); ok {
-		val = f
-	} else if f, err := strconv.ParseFloat(s, 64); err == nil {
-		val = f
+		return int64((f - 25569) * 86400000) - (7 * 3600000)
 	}
-
-	if val > 0 {
-		// Excel epoch: Dec 30, 1899
-		t := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
-		days := int(math.Floor(val))
-		fraction := val - float64(days)
-		seconds := int(fraction * 86400)
-		// Trả về timestamp
-		return t.AddDate(0, 0, days).Add(time.Duration(seconds) * time.Second).UnixMilli()
+	
+	// Case 2: String
+	s := fmt.Sprintf("%v", v)
+	// Node.js logic: Date.UTC(...)
+	// Golang: ParseInLocation với múi giờ UTC+7
+	if strings.Contains(s, "/") || strings.Contains(s, "-") || strings.Contains(s, ":") {
+		// Thử các format phổ biến
+		layouts := []string{
+			"02/01/2006 15:04:05",
+			"02/01/2006",
+			"2006-01-02 15:04:05",
+		}
+		loc := time.FixedZone("UTC+7", 7*3600)
+		for _, l := range layouts {
+			if t, err := time.ParseInLocation(l, s, loc); err == nil {
+				return t.UnixMilli()
+			}
+		}
 	}
 	return 0
 }
 
-// --- CÁC STRUCT PROFILE ---
+// --- STRUCT PROFILES ---
 type AuthProfile struct {
 	UID      string `json:"uid"`
 	Email    string `json:"email"`
@@ -77,28 +73,15 @@ type AiProfile struct {
 
 func MakeAuthProfile(row []interface{}) AuthProfile {
 	return AuthProfile{
-		UID:      getString(row, INDEX_DATA_TIKTOK.USER_ID),
-		Email:    getString(row, INDEX_DATA_TIKTOK.EMAIL),
-		Password: getString(row, INDEX_DATA_TIKTOK.PASSWORD),
-		User:     getString(row, INDEX_DATA_TIKTOK.USER_NAME),
-		TwoFA:    getString(row, INDEX_DATA_TIKTOK.TWO_FA),
-		Cookie:   getString(row, INDEX_DATA_TIKTOK.COOKIE),
-		Token:    getString(row, INDEX_DATA_TIKTOK.ACCESS_TOKEN),
+		UID: getString(row, INDEX_DATA_TIKTOK.USER_ID), Email: getString(row, INDEX_DATA_TIKTOK.EMAIL), Password: getString(row, INDEX_DATA_TIKTOK.PASSWORD),
+		User: getString(row, INDEX_DATA_TIKTOK.USER_NAME), TwoFA: getString(row, INDEX_DATA_TIKTOK.TWO_FA), Cookie: getString(row, INDEX_DATA_TIKTOK.COOKIE), Token: getString(row, INDEX_DATA_TIKTOK.ACCESS_TOKEN),
 	}
 }
 func MakeActivityProfile(row []interface{}) ActivityProfile {
-	return ActivityProfile{
-		LastActive: getString(row, INDEX_DATA_TIKTOK.LAST_ACTIVE_DATE),
-		PostCount:  getString(row, INDEX_DATA_TIKTOK.VIDEO_COUNT),
-		Follower:   getString(row, INDEX_DATA_TIKTOK.FOLLOWER_COUNT),
-	}
+	return ActivityProfile{ LastActive: getString(row, INDEX_DATA_TIKTOK.LAST_ACTIVE_DATE), PostCount: getString(row, INDEX_DATA_TIKTOK.VIDEO_COUNT), Follower: getString(row, INDEX_DATA_TIKTOK.FOLLOWER_COUNT), }
 }
 func MakeAiProfile(row []interface{}) AiProfile {
-	return AiProfile{
-		Signature: getString(row, INDEX_DATA_TIKTOK.SIGNATURE),
-		Persona:   getString(row, INDEX_DATA_TIKTOK.AI_PERSONA),
-		Target:    getString(row, INDEX_DATA_TIKTOK.TARGET_AUDIENCE),
-	}
+	return AiProfile{ Signature: getString(row, INDEX_DATA_TIKTOK.SIGNATURE), Persona: getString(row, INDEX_DATA_TIKTOK.AI_PERSONA), Target: getString(row, INDEX_DATA_TIKTOK.TARGET_AUDIENCE), }
 }
 func getString(row []interface{}, idx int) string {
 	if idx >= 0 && idx < len(row) { return fmt.Sprintf("%v", row[idx]) }
