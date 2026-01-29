@@ -68,7 +68,7 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	// [2] Parse Input
 	rowIndexInput := -1
 	if v, ok := body["row_index"]; ok {
-		// Dùng toFloat từ utils.go
+		// Sử dụng hàm toFloat từ utils.go
 		if val, ok := toFloat(v); ok { rowIndexInput = int(val) }
 	}
 
@@ -172,6 +172,27 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 					}
 				}
 			}
+		}
+	}
+
+	// 🔥 LOGIC TINH CHỈNH MESSAGE (MỚI THÊM)
+	// Nếu không tìm thấy nick nào chạy được ở trên
+	if action == "login" || action == "auto" {
+		// Kiểm tra xem Device này có nick nào đang "Hoàn thành" không
+		completedIndices := cacheData.StatusMap[STATUS_READ.COMPLETED]
+		hasCompletedNick := false
+		
+		for _, idx := range completedIndices {
+			if idx < len(cacheData.CleanValues) {
+				if cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] == deviceId {
+					hasCompletedNick = true
+					break
+				}
+			}
+		}
+
+		if hasCompletedNick {
+			return nil, fmt.Errorf("Các tài khoản đã hoàn thành")
 		}
 	}
 
