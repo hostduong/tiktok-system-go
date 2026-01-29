@@ -110,7 +110,7 @@ var QUEUE = struct {
 	FLUSH_INTERVAL_MS int64 // Thời gian xả hàng đợi xuống đĩa (3 giây/lần)
 	BATCH_LIMIT_BASE  int   // Số lượng dòng tối đa cho 1 lần ghi
 }{
-	FLUSH_INTERVAL_MS: 3000, // 3 giây
+	FLUSH_INTERVAL_MS: 1000, // 3 giây
 	BATCH_LIMIT_BASE:  500,  // 500 dòng
 }
 
