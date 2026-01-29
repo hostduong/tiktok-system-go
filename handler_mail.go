@@ -46,8 +46,8 @@ func HandleMailData(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "true", "messenger": "Đã tiếp nhận mail log"})
 }
 
-// 🔥 LOGIC ĐỌC MAIL OTP (NODE.JS V243)
-func HandleGetMail(w http.ResponseWriter, r *http.Request) {
+// 🔥 SỬA TÊN HÀM Ở ĐÂY CHO KHỚP VỚI MAIN.GO
+func HandleReadMail(w http.ResponseWriter, r *http.Request) {
 	var body map[string]interface{}
 	json.NewDecoder(r.Body).Decode(&body)
 	tokenData, ok := r.Context().Value("tokenData").(*TokenData)
@@ -64,7 +64,6 @@ func HandleGetMail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 🔥 GLOBAL LOCK
 	STATE.SheetMutex.RLock()
 	rows := cacheData.RawValues
 	
@@ -75,19 +74,18 @@ func HandleGetMail(w http.ResponseWriter, r *http.Request) {
 	limitTime := time.Now().Add(time.Duration(-RANGES.EMAIL_WINDOW_MINUTES) * time.Minute).UnixMilli()
 	processCount := 0
 	
-	// Scan backward
 	for i := len(rows) - 1; i >= 0; i-- {
 		if processCount >= RANGES.EMAIL_LIMIT_ROWS { break }
 		processCount++
 		
 		row := rows[i]
-		if len(row) <= 7 { continue } // Min columns for Read status
+		if len(row) <= 7 { continue }
 
-		mailTime := ConvertSerialDate(row[0]) // 🔥 Dùng hàm Utils
+		mailTime := ConvertSerialDate(row[0])
 		if mailTime < limitTime { break }
 
-		if fmt.Sprintf("%v", row[6]) == "" { continue } // No code
-		if CleanString(row[7]) == "true" { continue } // Already read
+		if fmt.Sprintf("%v", row[6]) == "" { continue }
+		if CleanString(row[7]) == "true" { continue }
 		if CleanString(row[2]) != email { continue }
 		if keyword != "" && !strings.Contains(CleanString(row[3]), keyword) { continue }
 
@@ -102,7 +100,6 @@ func HandleGetMail(w http.ResponseWriter, r *http.Request) {
 	STATE.SheetMutex.RUnlock()
 
 	if found && markRead {
-		// Clone row for update
 		STATE.SheetMutex.RLock()
 		newRow := make([]interface{}, len(rows[targetIdx]))
 		copy(newRow, rows[targetIdx])
@@ -119,5 +116,4 @@ func HandleGetMail(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Stub
 func CleanupOldMails() {}
