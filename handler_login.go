@@ -23,7 +23,6 @@ type LoginResponse struct {
 
 func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 	var body map[string]interface{}
-	// Đã check lỗi JSON ở Middleware, ở đây chỉ decode lại
 	json.NewDecoder(r.Body).Decode(&body)
 
 	tokenData, ok := r.Context().Value("tokenData").(*TokenData)
@@ -54,11 +53,16 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action string) (*LoginResponse, error) {
-	// 1. Load Data (Partitioned)
+	// [1] Load Data (RAM mới)
 	cacheData, err := LayDuLieu(sid, SHEET_NAMES.DATA_TIKTOK, false)
 	if err != nil { return nil, fmt.Errorf("Lỗi tải dữ liệu") }
 
-	// 2. Parse Search Cols (ONLY search_col_)
+	// [2] Parse Input
+	rowIndexInput := -1
+	if v, ok := body["row_index"]; ok {
+		if val, ok := v.(float64); ok { rowIndexInput = int(val) }
+	}
+	
 	searchCols := make(map[int]string)
 	for k, v := range body {
 		if strings.HasPrefix(k, "search_col_") {
@@ -69,11 +73,14 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	}
 	hasSearch := len(searchCols) > 0
 
-	// 3. ƯU TIÊN 1: NICK CŨ (AssignedMap - O(1))
-	if idx, ok := cacheData.AssignedMap[deviceId]; ok && idx < len(cacheData.RawValues) {
-		cleanRow := cacheData.CleanValues[idx]
-		if cleanRow[INDEX_DATA_TIKTOK.DEVICE_ID] == deviceId {
-			// Check khớp Search (nếu có)
+	// --- LOGIC GIỐNG NODE.JS (Dòng 510) ---
+	
+	// A. ƯU TIÊN 0: FAST PATH (Check theo Row Index nếu có)
+	if rowIndexInput >= RANGES.DATA_START_ROW {
+		idx := rowIndexInput - RANGES.DATA_START_ROW
+		if idx >= 0 && idx < len(cacheData.RawValues) {
+			cleanRow := cacheData.CleanValues[idx]
+			// Check khớp Search (Thay vì check user_id như Nodejs cũ, ta check search_col_)
 			match := true
 			if hasSearch {
 				for cIdx, val := range searchCols {
@@ -84,26 +91,45 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 			if match {
 				val := kiem_tra_chat_luong_clean(cleanRow, action)
 				if val.Valid {
+					// Tìm thấy ngay tại dòng chỉ định
+					return commit_and_response(sid, deviceId, cacheData, idx, determineType(cleanRow), val.SystemEmail, action)
+				}
+				// Nếu không valid -> Bỏ qua, xuống tìm mới (như Node.js)
+			}
+		}
+	}
+
+	// B. ƯU TIÊN 1: CHECK ASSIGNED MAP (Nick cũ)
+	if idx, ok := cacheData.AssignedMap[deviceId]; ok && idx < len(cacheData.RawValues) {
+		cleanRow := cacheData.CleanValues[idx]
+		if cleanRow[INDEX_DATA_TIKTOK.DEVICE_ID] == deviceId {
+			match := true
+			if hasSearch {
+				for cIdx, val := range searchCols {
+					if cIdx >= len(cleanRow) || cleanRow[cIdx] != val { match = false; break }
+				}
+			}
+			if match {
+				val := kiem_tra_chat_luong_clean(cleanRow, action)
+				if val.Valid {
 					return commit_and_response(sid, deviceId, cacheData, idx, determineType(cleanRow), val.SystemEmail, action)
 				}
 			}
 		}
 	}
 
-	// 4. ƯU TIÊN 2: SEARCH MỚI (O(N) - Chỉ chạy khi có search_col)
+	// C. ƯU TIÊN 2: SEARCH MODE (Nếu có search_col)
 	if hasSearch {
-		// Quét mảng tìm nick khớp search_col
 		for i, row := range cacheData.CleanValues {
 			match := true
 			for cIdx, val := range searchCols {
 				if cIdx >= len(row) || row[cIdx] != val { match = false; break }
 			}
-			
 			if match {
 				val := kiem_tra_chat_luong_clean(row, action)
 				if val.Valid {
-					// Chỉ lấy nếu nick trống hoặc của chính mình
 					curDev := row[INDEX_DATA_TIKTOK.DEVICE_ID]
+					// Logic Node.js: Search ưu tiên lấy (kể cả có chủ). Ở đây ta giữ logic an toàn.
 					if curDev == "" || curDev == deviceId {
 						return commit_and_response(sid, deviceId, cacheData, i, determineType(row), val.SystemEmail, action)
 					}
@@ -115,7 +141,7 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 		return nil, fmt.Errorf("Không tìm thấy tài khoản theo yêu cầu")
 	}
 
-	// 5. ƯU TIÊN 3: AUTO PICK (StatusMap - O(1))
+	// D. ƯU TIÊN 3: AUTO PICK (Status Map)
 	if action != "view_only" {
 		isReset := false
 		if v, ok := body["is_reset"].(bool); ok && v { isReset = true }
@@ -126,23 +152,18 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 			indices := cacheData.StatusMap[statusKey]
 			for _, idx := range indices {
 				if idx < len(cacheData.CleanValues) {
-					// Check DeviceID empty in RAM
 					if cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] == "" {
 						val := kiem_tra_chat_luong_clean(cacheData.CleanValues[idx], action)
 						if !val.Valid {
 							doSelfHealing(sid, idx, val.Missing, cacheData)
 							continue
 						}
-
-						// Global Lock & Claim
+						// Lock & Claim
 						STATE.SheetMutex.Lock()
 						if cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] == "" {
-							// Update RAM Partition
 							cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
 							cacheData.RawValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
 							cacheData.AssignedMap[deviceId] = idx
-							// Note: Vẫn giữ trong UnassignedList cho đơn giản (chỉ check string empty)
-							
 							STATE.SheetMutex.Unlock()
 							return commit_and_response(sid, deviceId, cacheData, idx, determineType(cacheData.CleanValues[idx]), val.SystemEmail, action)
 						}
@@ -172,7 +193,7 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 	if cache.CleanValues[idx][INDEX_DATA_TIKTOK.STATUS] == STATUS_READ.COMPLETED { mode = "reset" }
 	tNote := tao_ghi_chu_chuan(oldNote, tSt, mode)
 
-	// Update RAM & Status Map
+	// Update RAM
 	STATE.SheetMutex.Lock()
 	oldCleanSt := cache.CleanValues[idx][INDEX_DATA_TIKTOK.STATUS]
 	
@@ -183,7 +204,7 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 	if INDEX_DATA_TIKTOK.STATUS < CACHE.CLEAN_COL_LIMIT { cache.CleanValues[idx][INDEX_DATA_TIKTOK.STATUS] = CleanString(tSt) }
 	if INDEX_DATA_TIKTOK.NOTE < CACHE.CLEAN_COL_LIMIT { cache.CleanValues[idx][INDEX_DATA_TIKTOK.NOTE] = CleanString(tNote) }
 	
-	// Move Status Index
+	// Move Status Index (Logic Partition Cache)
 	if oldCleanSt != CleanString(tSt) {
 		removeFromStatusMap(cache.StatusMap, oldCleanSt, idx)
 		newSt := CleanString(tSt)
@@ -191,7 +212,7 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 	}
 	STATE.SheetMutex.Unlock()
 
-	// Queue Update
+	// Update Queue
 	newRow := make([]interface{}, len(row))
 	copy(newRow, row)
 	newRow[INDEX_DATA_TIKTOK.STATUS] = tSt
@@ -199,6 +220,7 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 	newRow[INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
 	QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, idx, newRow)
 
+	// Message chuẩn Node.js (dòng 533)
 	msg := "Lấy nick đăng nhập thành công"
 	if typ == "register" { msg = "Lấy nick đăng ký thành công" }
 
@@ -221,19 +243,18 @@ func removeFromStatusMap(m map[string][]int, status string, targetIdx int) {
 }
 
 func doSelfHealing(sid string, idx int, missing string, cache *SheetCacheData) {
-	// Update RAM & Queue Status -> ATTENTION
-	STATE.SheetMutex.Lock()
-	defer STATE.SheetMutex.Unlock()
-	
 	msg := "Nick thiếu " + missing + "\n" + time.Now().Format("02/01/2006 15:04:05")
-	cache.RawValues[idx][INDEX_DATA_TIKTOK.STATUS] = STATUS_WRITE.ATTENTION
-	cache.RawValues[idx][INDEX_DATA_TIKTOK.NOTE] = msg
-	// (Có thể update StatusMap ở đây nếu muốn kỹ)
+	// Update RAM nhẹ để tránh loop lại
+	STATE.SheetMutex.Lock()
+	if INDEX_DATA_TIKTOK.STATUS < len(cache.RawValues[idx]) {
+		cache.RawValues[idx][INDEX_DATA_TIKTOK.STATUS] = STATUS_WRITE.ATTENTION
+		cache.RawValues[idx][INDEX_DATA_TIKTOK.NOTE] = msg
+	}
+	fullRow := make([]interface{}, len(cache.RawValues[idx]))
+	copy(fullRow, cache.RawValues[idx])
+	STATE.SheetMutex.Unlock()
 
-	updateData := make([]interface{}, len(cache.RawValues[idx]))
-	copy(updateData, cache.RawValues[idx])
-	// Cần copy updateData vì Queue chạy async
-	go QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, idx, updateData)
+	go QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, idx, fullRow)
 }
 
 func getPriorityList(action string, isReset bool) []string {
