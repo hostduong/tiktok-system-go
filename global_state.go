@@ -2,6 +2,7 @@ package main
 
 import "sync"
 
+// Kho chứa dữ liệu toàn cục
 var STATE = struct {
 	TokenMutex sync.RWMutex
 	TokenCache map[string]*CachedToken
@@ -27,7 +28,7 @@ var STATE = struct {
 	WriteQueue: make(map[string]*WriteQueueData),
 }
 
-// Struct kết quả Auth (Fix lỗi undefined)
+// 🔥 Fix lỗi undefined: AuthResult (Dùng chung cho service_auth và các handler)
 type AuthResult struct {
 	IsValid       bool
 	Messenger     string
@@ -54,21 +55,22 @@ type RateLimitData struct {
 	LastReset int64
 }
 
-// 🔥 CẤU TRÚC CACHE PHÂN VÙNG (PARTITIONED)
+// 🔥 CẤU TRÚC CACHE PHÂN VÙNG (PARTITIONED CACHE)
 type SheetCacheData struct {
-	RawValues      [][]interface{}
-	CleanValues    [][]string
-	AssignedMap    map[string]int   // Key: DeviceID -> Value: RowIndex
-	UnassignedList []int            // List RowIndex chưa có chủ
+	RawValues      [][]interface{}  // Dữ liệu gốc
+	CleanValues    [][]string       // Dữ liệu string (lowercase)
+	AssignedMap    map[string]int   // Key: DeviceID -> Value: RowIndex (Truy cập O(1))
+	UnassignedList []int            // List Index của nick trống (DeviceId == "")
 	StatusMap      map[string][]int // Key: Status -> List RowIndex
 	LastAccessed   int64
 	Timestamp      int64
 	TTL            int64
 }
 
+// Queue chung cho Data và Mail
 type WriteQueueData struct {
 	Timer      bool
 	IsFlushing bool
-	Updates    map[string]map[int][]interface{}
-	Appends    map[string][][]interface{}
+	Updates    map[string]map[int][]interface{} // Sheet -> Row -> Data
+	Appends    map[string][][]interface{}       // Sheet -> Rows
 }
