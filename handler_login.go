@@ -21,6 +21,13 @@ type LoginResponse struct {
 	AiProfile       AiProfile       `json:"ai_profile"`
 }
 
+type PriorityStep struct {
+	Status  string
+	IsMy    bool
+	IsEmpty bool
+	PrioID  int // Để xác định reset completed
+}
+
 func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 	var body map[string]interface{}
 	json.NewDecoder(r.Body).Decode(&body)
@@ -72,9 +79,9 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	}
 	hasSearch := len(searchCols) > 0
 
-	// --- LOGIC XỬ LÝ ---
+	// --- LOGIC XỬ LÝ CHUẨN NODE.JS V243 ---
 
-	// A. FAST PATH (Row Index)
+	// A. ƯU TIÊN 0: FAST PATH (Row Index)
 	if rowIndexInput >= RANGES.DATA_START_ROW {
 		idx := rowIndexInput - RANGES.DATA_START_ROW
 		if idx >= 0 && idx < len(cacheData.RawValues) {
@@ -94,26 +101,7 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 		}
 	}
 
-	// B. CHECK ASSIGNED MAP (Nick cũ)
-	if idx, ok := cacheData.AssignedMap[deviceId]; ok && idx < len(cacheData.RawValues) {
-		cleanRow := cacheData.CleanValues[idx]
-		if cleanRow[INDEX_DATA_TIKTOK.DEVICE_ID] == deviceId {
-			match := true
-			if hasSearch {
-				for cIdx, val := range searchCols {
-					if cIdx >= len(cleanRow) || cleanRow[cIdx] != val { match = false; break }
-				}
-			}
-			if match {
-				val := kiem_tra_chat_luong_clean(cleanRow, action)
-				if val.Valid {
-					return commit_and_response(sid, deviceId, cacheData, idx, determineType(cleanRow), val.SystemEmail, action, 0)
-				}
-			}
-		}
-	}
-
-	// C. SEARCH MODE
+	// B. SEARCH MODE
 	if hasSearch {
 		for i, row := range cacheData.CleanValues {
 			match := true
@@ -135,36 +123,59 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 		return nil, fmt.Errorf("Không tìm thấy tài khoản theo yêu cầu")
 	}
 
-	// D. AUTO PICK (Status Map)
+	// C. UNIFIED PRIORITY LOOP (Thay thế cho Step B cũ & Step D cũ)
+	// Đảm bảo đúng thứ tự ưu tiên tuyệt đối giữa Nick cũ và Nick mới
 	if action != "view_only" {
 		isReset := false
 		if v, ok := body["is_reset"].(bool); ok && v { isReset = true }
 		
-		priorities := getPriorityList(action, isReset)
+		// Lấy danh sách ưu tiên chuẩn (bao gồm cả My và Empty đan xen)
+		steps := buildPrioritySteps(action, isReset)
 		
-		for pIndex, statusKey := range priorities {
-			indices := cacheData.StatusMap[statusKey]
-			for _, idx := range indices {
-				if idx < len(cacheData.CleanValues) {
-					if cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] == "" {
-						val := kiem_tra_chat_luong_clean(cacheData.CleanValues[idx], action)
+		// Check nhanh Nick cũ đang ở dòng nào (O(1))
+		myCurrentIdx, hasMyNick := cacheData.AssignedMap[deviceId]
+		
+		for _, step := range steps {
+			// Case 1: Tìm Nick của mình (My) trong Status này
+			if step.IsMy {
+				if hasMyNick && myCurrentIdx < len(cacheData.CleanValues) {
+					myRow := cacheData.CleanValues[myCurrentIdx]
+					// Chỉ lấy nếu DeviceId khớp (double check) và Status khớp
+					if myRow[INDEX_DATA_TIKTOK.DEVICE_ID] == deviceId && 
+					   myRow[INDEX_DATA_TIKTOK.STATUS] == step.Status {
 						
-						if !val.Valid {
-							doSelfHealing(sid, idx, val.Missing, cacheData)
-							continue
+						val := kiem_tra_chat_luong_clean(myRow, action)
+						if val.Valid {
+							return commit_and_response(sid, deviceId, cacheData, myCurrentIdx, determineType(myRow), val.SystemEmail, action, step.PrioID)
 						}
+					}
+				}
+			}
 
-						// Lock & Claim
-						STATE.SheetMutex.Lock()
+			// Case 2: Tìm Nick trống (Empty) trong Status này
+			if step.IsEmpty {
+				indices := cacheData.StatusMap[step.Status]
+				for _, idx := range indices {
+					if idx < len(cacheData.CleanValues) {
 						if cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] == "" {
-							cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
-							cacheData.RawValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
-							cacheData.AssignedMap[deviceId] = idx
+							val := kiem_tra_chat_luong_clean(cacheData.CleanValues[idx], action)
+							if !val.Valid {
+								doSelfHealing(sid, idx, val.Missing, cacheData)
+								continue
+							}
+
+							// Lock & Claim
+							STATE.SheetMutex.Lock()
+							if cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] == "" {
+								cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
+								cacheData.RawValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
+								cacheData.AssignedMap[deviceId] = idx
+								STATE.SheetMutex.Unlock()
+								
+								return commit_and_response(sid, deviceId, cacheData, idx, determineType(cacheData.CleanValues[idx]), val.SystemEmail, action, step.PrioID)
+							}
 							STATE.SheetMutex.Unlock()
-							
-							return commit_and_response(sid, deviceId, cacheData, idx, determineType(cacheData.CleanValues[idx]), val.SystemEmail, action, pIndex)
 						}
-						STATE.SheetMutex.Unlock()
 					}
 				}
 			}
@@ -172,6 +183,44 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	}
 
 	return nil, fmt.Errorf("Không còn tài khoản phù hợp")
+}
+
+// Xây dựng danh sách ưu tiên chuẩn (Giống Node.js Groups)
+func buildPrioritySteps(action string, isReset bool) []PriorityStep {
+	var steps []PriorityStep
+	
+	// Helper
+	add := func(st string, my, empty bool, prio int) {
+		steps = append(steps, PriorityStep{Status: st, IsMy: my, IsEmpty: empty, PrioID: prio})
+	}
+
+	if strings.Contains(action, "login") {
+		add(STATUS_READ.RUNNING, true, false, 1)
+		add(STATUS_READ.WAITING, true, false, 2)
+		add(STATUS_READ.LOGIN, true, false, 3)
+		add(STATUS_READ.LOGIN, false, true, 4) // Empty Login
+		if isReset {
+			add(STATUS_READ.COMPLETED, true, false, 5)
+		}
+	} else if action == "register" {
+		add(STATUS_READ.REGISTERING, true, false, 1)
+		add(STATUS_READ.WAIT_REG, true, false, 2)
+		add(STATUS_READ.REGISTER, true, false, 3)
+		add(STATUS_READ.REGISTER, false, true, 4) // Empty Register
+	} else if action == "auto" {
+		add(STATUS_READ.RUNNING, true, false, 1)
+		add(STATUS_READ.WAITING, true, false, 2)
+		add(STATUS_READ.LOGIN, true, false, 3)
+		add(STATUS_READ.LOGIN, false, true, 4) // Empty Login (Ưu tiên hơn My Registering)
+		add(STATUS_READ.REGISTERING, true, false, 5)
+		add(STATUS_READ.WAIT_REG, true, false, 6)
+		add(STATUS_READ.REGISTER, true, false, 7)
+		add(STATUS_READ.REGISTER, false, true, 8) // Empty Register
+		if isReset {
+			add(STATUS_READ.COMPLETED, true, false, 9)
+		}
+	}
+	return steps
 }
 
 func determineType(row []string) string {
@@ -201,7 +250,6 @@ func getCleanupIndices(cache *SheetCacheData, deviceId string, targetIdx int, is
 }
 
 func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, typ, email, action string, priority int) (*LoginResponse, error) {
-	// 🔥 LOGIC VIEW ONLY: Trả về ngay, KHÔNG GHI RAM, KHÔNG GHI DISK (Chuẩn Node.js)
 	if action == "view_only" {
 		row := cache.RawValues[idx]
 		return &LoginResponse{
@@ -220,7 +268,8 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 	
 	isResetCompleted := false
 	if action == "auto" || action == "login_reset" {
-		if cache.CleanValues[idx][INDEX_DATA_TIKTOK.STATUS] == STATUS_READ.COMPLETED {
+		// Priority 5 (Login) hoặc 9 (Auto) là Reset Completed
+		if priority == 5 || priority == 9 {
 			mode = "reset"
 			isResetCompleted = true
 		}
@@ -325,13 +374,9 @@ func doSelfHealing(sid string, idx int, missing string, cache *SheetCacheData) {
 	go QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, idx, fullRow)
 }
 
-func getPriorityList(action string, isReset bool) []string {
-	var list []string
-	if strings.Contains(action, "login") { list = append(list, STATUS_READ.RUNNING, STATUS_READ.WAITING, STATUS_READ.LOGIN) }
-	if strings.Contains(action, "register") { list = append(list, STATUS_READ.REGISTERING, STATUS_READ.WAIT_REG, STATUS_READ.REGISTER) }
-	if action == "auto" { list = append(list, STATUS_READ.RUNNING, STATUS_READ.WAITING, STATUS_READ.LOGIN, STATUS_READ.REGISTERING, STATUS_READ.WAIT_REG, STATUS_READ.REGISTER) }
-	if isReset { list = append(list, STATUS_READ.COMPLETED) }
-	return list
+func toFloat(v interface{}) (float64, bool) {
+	if f, ok := v.(float64); ok { return f, true }
+	return 0, false
 }
 
 type QualityResult struct { Valid bool; SystemEmail string; Missing string }
