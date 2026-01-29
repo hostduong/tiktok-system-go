@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-// Sử dụng Struct tường minh cho Response
 type UpdateResponse struct {
 	Status          string          `json:"status"`
 	Type            string          `json:"type"`
