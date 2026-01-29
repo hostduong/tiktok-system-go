@@ -2,7 +2,7 @@ package main
 
 import (
 	"encoding/json"
-	"fmt" // 🔥 Fix import
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -106,7 +106,7 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 		// Time
 		for idx, hours := range criteriaTime {
 			timeVal := int64(0)
-			if idx < len(row) { timeVal = ConvertSerialDate(row[idx]) } // 🔥 Dùng Utils
+			if idx < len(row) { timeVal = ConvertSerialDate(row[idx]) } // Dùng Utils
 			if timeVal == 0 { match = false; break }
 			if float64(now-timeVal)/3600000.0 > hours { match = false; break }
 		}
@@ -125,7 +125,6 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Helpers local (parseConditionInput, etc)
 func parseConditionInput(v interface{}) []string {
 	if s, ok := v.(string); ok { return []string{CleanString(s)} }
 	if arr, ok := v.([]interface{}); ok {
