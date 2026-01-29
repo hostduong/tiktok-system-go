@@ -221,3 +221,33 @@ func getKeyName(idx int) string {
 	return "" 
 }
 func AnhXaAuth(row []interface{}) map[string]interface{} { return nil } // Placeholder để tương thích code cũ nếu có
+
+package main
+
+import (
+	"strconv"
+)
+
+func getFloatVal(v interface{}) float64 {
+	if v == nil {
+		return 0
+	}
+	switch i := v.(type) {
+	case float64:
+		return i
+	case float32:
+		return float64(i)
+	case int:
+		return float64(i)
+	case int64:
+		return float64(i)
+	case string:
+		f, err := strconv.ParseFloat(i, 64)
+		if err != nil {
+			return 0
+		}
+		return f
+	default:
+		return 0
+	}
+}
