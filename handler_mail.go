@@ -4,27 +4,55 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
 
 func HandleMailData(w http.ResponseWriter, r *http.Request) {
-	// ... (Parse Body & Auth giữ nguyên) ...
-	
-	// 🔥 Logic chính đã đổi:
-	// Thay vì dùng STATE.MailQueue -> Dùng QueueAppend
-	
-	// Stub tạm để build thành công (Vì bạn đang dùng unified queue)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "true", "messenger": "Mail log queued"})
+	var body map[string]interface{}
+	json.NewDecoder(r.Body).Decode(&body)
+	tokenData, ok := r.Context().Value("tokenData").(*TokenData)
+	if !ok { return }
+
+	dataList, _ := body["data"].([]interface{})
+	rowsBySheet := make(map[string][][]interface{})
+
+	for _, item := range dataList {
+		obj, ok := item.(map[string]interface{})
+		if !ok { continue }
+		sheet := SHEET_NAMES.EMAIL_LOGGER
+		if s, ok := obj["sheet"].(string); ok && s != "" { sheet = s }
+
+		maxCol := 0
+		for k := range obj {
+			if strings.HasPrefix(k, "col_") {
+				if idx, err := strconv.Atoi(k[4:]); err == nil && idx > maxCol { maxCol = idx }
+			}
+		}
+		row := make([]interface{}, maxCol+1)
+		for i := range row { row[i] = "" }
+		for k, v := range obj {
+			if strings.HasPrefix(k, "col_") {
+				if idx, err := strconv.Atoi(k[4:]); err == nil { row[idx] = v }
+			}
+		}
+		rowsBySheet[sheet] = append(rowsBySheet[sheet], row)
+	}
+
+	for s, r := range rowsBySheet {
+		if len(r) > 0 { QueueAppend(tokenData.SpreadsheetID, s, r) }
+	}
+	json.NewEncoder(w).Encode(map[string]string{"status": "true", "messenger": "Đã tiếp nhận mail log"})
 }
 
-// Logic đọc mail (Read Mail)
+// 🔥 LOGIC ĐỌC MAIL OTP (NODE.JS V243)
 func HandleGetMail(w http.ResponseWriter, r *http.Request) {
 	var body map[string]interface{}
 	json.NewDecoder(r.Body).Decode(&body)
-	
-	tokenData, _ := r.Context().Value("tokenData").(*TokenData)
+	tokenData, ok := r.Context().Value("tokenData").(*TokenData)
+	if !ok { http.Error(w, "Unauthorized", 401); return }
+
 	sid := tokenData.SpreadsheetID
 	email := CleanString(body["email"])
 	keyword := CleanString(body["keyword"])
@@ -32,52 +60,64 @@ func HandleGetMail(w http.ResponseWriter, r *http.Request) {
 
 	cacheData, err := LayDuLieu(sid, SHEET_NAMES.EMAIL_LOGGER, false)
 	if err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": "Lỗi data"})
+		json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": "Lỗi đọc dữ liệu"})
 		return
 	}
 
-	// Lock để đọc an toàn
+	// 🔥 GLOBAL LOCK
 	STATE.SheetMutex.RLock()
 	rows := cacheData.RawValues
+	
+	var resultData map[string]interface{}
 	found := false
-	var result map[string]interface{}
-	var targetIdx int
-
-	// Quét ngược từ dưới lên (Mới nhất)
+	targetIdx := -1
+	
+	limitTime := time.Now().Add(time.Duration(-RANGES.EMAIL_WINDOW_MINUTES) * time.Minute).UnixMilli()
+	processCount := 0
+	
+	// Scan backward
 	for i := len(rows) - 1; i >= 0; i-- {
+		if processCount >= RANGES.EMAIL_LIMIT_ROWS { break }
+		processCount++
+		
 		row := rows[i]
-		if len(row) < 8 { continue } // Cột H là index 7
-		
-		// Check conditions (Email, Keyword, Unread...)
-		// ... (Logic so sánh giống Node.js) ...
-		
-		// Giả sử tìm thấy
-		if true { // Replace with real condition
-			targetIdx = i
-			found = true
-			result = map[string]interface{}{
-				"code": row[6], // Ví dụ cột G
-			}
-			break
+		if len(row) <= 7 { continue } // Min columns for Read status
+
+		mailTime := ConvertSerialDate(row[0]) // 🔥 Dùng hàm Utils
+		if mailTime < limitTime { break }
+
+		if fmt.Sprintf("%v", row[6]) == "" { continue } // No code
+		if CleanString(row[7]) == "true" { continue } // Already read
+		if CleanString(row[2]) != email { continue }
+		if keyword != "" && !strings.Contains(CleanString(row[3]), keyword) { continue }
+
+		found = true
+		targetIdx = i
+		resultData = map[string]interface{}{
+			"date": row[0], "sender_name": row[1], "receiver_email": row[2],
+			"sender_email": row[3], "subject": row[4], "body": row[5], "code": row[6],
 		}
+		break
 	}
 	STATE.SheetMutex.RUnlock()
 
 	if found && markRead {
-		// 🔥 Dùng Queue Update Chung (Thay vì MailQueue riêng)
-		// Chỉ update cột H (Read) -> TRUE
-		updateRow := make([]interface{}, 8) // Giả sử độ dài row
-		updateRow[7] = "TRUE"
-		// Lưu ý: Logic QueueUpdate của ta đang update CẢ DÒNG. 
-		// Để tối ưu (chỉ update 1 ô), cần sửa logic Queue hoặc chấp nhận ghi đè cả dòng.
-		// Tạm thời ghi đè cả dòng (lấy từ cache ra sửa)
+		// Clone row for update
+		STATE.SheetMutex.RLock()
+		newRow := make([]interface{}, len(rows[targetIdx]))
+		copy(newRow, rows[targetIdx])
+		STATE.SheetMutex.RUnlock()
 		
-		// TODO: Implement logic lấy full row, sửa cột H, rồi QueueUpdate(sid, EMAIL_LOGGER, targetIdx, fullRow)
+		newRow[7] = "TRUE"
+		QueueUpdate(sid, SHEET_NAMES.EMAIL_LOGGER, targetIdx, newRow)
 	}
 
 	if found {
-		json.NewEncoder(w).Encode(map[string]interface{}{"status": "true", "email": result})
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "true", "messenger": "Lấy mã thành công", "email": resultData})
 	} else {
-		json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": "Không tìm thấy mail"})
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "true", "messenger": "Không tìm thấy mail", "email": map[string]interface{}{}})
 	}
 }
+
+// Stub
+func CleanupOldMails() {}
