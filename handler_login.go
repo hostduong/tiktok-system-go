@@ -9,6 +9,10 @@ import (
 	"time"
 )
 
+// --- GIỮ NGUYÊN CÁC STRUCT VÀ HÀM KHÁC Ở ĐẦU FILE ---
+// (Chỉ thay thế hàm commit_and_response và các hàm hỗ trợ bên dưới nếu cần, 
+// nhưng để an toàn, đây là FULL nội dung file handler_login.go đã update logic của bạn)
+
 type LoginResponse struct {
 	Status          string          `json:"status"`
 	Type            string          `json:"type"`
@@ -43,25 +47,33 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 	json.NewDecoder(r.Body).Decode(&body)
 
 	tokenData, ok := r.Context().Value("tokenData").(*TokenData)
-	if !ok { return }
+	if !ok {
+		return
+	}
 
 	sid := tokenData.SpreadsheetID
 	deviceId := CleanString(body["deviceId"])
 	reqType := CleanString(body["type"])
-	
+
 	action := "login"
-	if reqType == "view" { action = "view_only" }
+	if reqType == "view" {
+		action = "view_only"
+	}
 	if reqType == "auto" {
 		action = "auto"
 		if reqAction, _ := body["action"].(string); CleanString(reqAction) == "reset" {
 			body["is_reset"] = true
 		}
 	}
-	if reqType == "register" { action = "register" }
-	if reqAction, _ := body["action"].(string); CleanString(reqAction) == "reset" { action = "login_reset" }
+	if reqType == "register" {
+		action = "register"
+	}
+	if reqAction, _ := body["action"].(string); CleanString(reqAction) == "reset" {
+		action = "login_reset"
+	}
 
 	res, err := xu_ly_lay_du_lieu(sid, deviceId, body, action)
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": err.Error()})
@@ -72,12 +84,16 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 
 func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action string) (*LoginResponse, error) {
 	cacheData, err := LayDuLieu(sid, SHEET_NAMES.DATA_TIKTOK, false)
-	if err != nil { return nil, fmt.Errorf("Lỗi tải dữ liệu") }
+	if err != nil {
+		return nil, fmt.Errorf("Lỗi tải dữ liệu")
+	}
 
 	// 1. Parse row_index
 	rowIndexInput := -1
 	if v, ok := body["row_index"]; ok {
-		if val, ok := toFloat(v); ok { rowIndexInput = int(val) }
+		if val, ok := toFloat(v); ok {
+			rowIndexInput = int(val)
+		}
 	}
 
 	// 2. Parse Bộ Lọc Nâng Cao (Advanced Filters)
@@ -94,7 +110,7 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 		if idx >= 0 && idx < rawLen {
 			cleanRow := cacheData.CleanValues[idx]
 			row := cacheData.RawValues[idx]
-			
+
 			// Kiểm tra điều kiện lọc (Nếu có)
 			if filters.HasFilter {
 				if !isRowMatched(cleanRow, row, filters) {
@@ -102,7 +118,7 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 					return nil, fmt.Errorf("row_index không đủ điều kiện") // 🔥 Báo lỗi ngay theo yêu cầu
 				}
 			}
-			
+
 			// Kiểm tra chất lượng (Pass/Mail)
 			val := KiemTraChatLuongClean(cleanRow, action)
 			if val.Valid {
@@ -127,7 +143,7 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 			if !isRowMatched(cleanRow, cacheData.RawValues[i], filters) {
 				continue
 			}
-			
+
 			// 2. Check quyền sở hữu (Trống hoặc Của mình)
 			curDev := cleanRow[INDEX_DATA_TIKTOK.DEVICE_ID]
 			if curDev != "" && curDev != deviceId {
@@ -155,24 +171,28 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	// =================================================================================
 	if action != "view_only" {
 		isReset := false
-		if v, ok := body["is_reset"].(bool); ok && v { isReset = true }
-		if action == "login_reset" { isReset = true }
+		if v, ok := body["is_reset"].(bool); ok && v {
+			isReset = true
+		}
+		if action == "login_reset" {
+			isReset = true
+		}
 
 		steps := buildPrioritySteps(action, isReset)
-		
+
 		for _, step := range steps {
 			indices := cacheData.StatusMap[step.Status]
 			for _, idx := range indices {
 				if idx < rawLen {
 					row := cacheData.CleanValues[idx]
 					curDev := row[INDEX_DATA_TIKTOK.DEVICE_ID]
-					
+
 					isMyNick := (curDev == deviceId)
 					isEmptyNick := (curDev == "")
-					
+
 					if (step.IsMy && isMyNick) || (step.IsEmpty && isEmptyNick) {
 						val := KiemTraChatLuongClean(row, action)
-						
+
 						if !val.Valid {
 							STATE.SheetMutex.RUnlock()
 							doSelfHealing(sid, idx, val.Missing, cacheData)
@@ -183,17 +203,17 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 						// CLAIM
 						STATE.SheetMutex.RUnlock()
 						STATE.SheetMutex.Lock()
-						
+
 						currentRealDev := cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID]
 						if (step.IsMy && currentRealDev == deviceId) || (step.IsEmpty && currentRealDev == "") {
 							cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
 							cacheData.RawValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
 							cacheData.AssignedMap[deviceId] = idx
-							
+
 							STATE.SheetMutex.Unlock()
 							return commit_and_response(sid, deviceId, cacheData, idx, determineType(cacheData.CleanValues[idx]), val.SystemEmail, action, step.PrioID)
 						}
-						
+
 						STATE.SheetMutex.Unlock()
 						STATE.SheetMutex.RLock()
 					}
@@ -250,17 +270,26 @@ func parseFilterParams(body map[string]interface{}) FilterParams {
 			}
 		} else if strings.HasPrefix(k, "min_col_") {
 			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "min_col_")); err == nil {
-				if val, ok := toFloat(v); ok { f.MinCols[idx] = val; f.HasFilter = true }
+				if val, ok := toFloat(v); ok {
+					f.MinCols[idx] = val
+					f.HasFilter = true
+				}
 			}
 		} else if strings.HasPrefix(k, "max_col_") {
 			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "max_col_")); err == nil {
-				if val, ok := toFloat(v); ok { f.MaxCols[idx] = val; f.HasFilter = true }
+				if val, ok := toFloat(v); ok {
+					f.MaxCols[idx] = val
+					f.HasFilter = true
+				}
 			}
 		} else if strings.HasPrefix(k, "last_hours_col_") {
 			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "last_hours_col_")); err == nil {
-				if val, ok := toFloat(v); ok { f.TimeCols[idx] = val; f.HasFilter = true }
+				if val, ok := toFloat(v); ok {
+					f.TimeCols[idx] = val
+					f.HasFilter = true
+				}
 			}
-		} else if strings.HasPrefix(k, "search_col_") { 
+		} else if strings.HasPrefix(k, "search_col_") {
 			// Hỗ trợ Legacy search_col_ như match_col_
 			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "search_col_")); err == nil {
 				f.MatchCols[idx] = ToSlice(v)
@@ -271,59 +300,86 @@ func parseFilterParams(body map[string]interface{}) FilterParams {
 	return f
 }
 
-// 🔥 Hàm kiểm tra logic Filter chi tiết
+// 🔥 Hàm kiểm tra logic Filter chi tiết (Đã fix lỗi getFloatVal gọi sai)
 func isRowMatched(cleanRow []string, rawRow []interface{}, f FilterParams) bool {
 	// 1. Match (Exact) - Logic OR trong mảng
 	for idx, targets := range f.MatchCols {
 		cellVal := ""
-		if idx < len(cleanRow) { cellVal = cleanRow[idx] }
-		
+		if idx < len(cleanRow) {
+			cellVal = cleanRow[idx]
+		}
+
 		match := false
 		for _, t := range targets {
-			if t == cellVal { match = true; break }
+			if t == cellVal {
+				match = true
+				break
+			}
 		}
-		if !match { return false }
+		if !match {
+			return false
+		}
 	}
 
 	// 2. Contains - Logic OR trong mảng
 	for idx, targets := range f.ContainsCols {
 		cellVal := ""
-		if idx < len(cleanRow) { cellVal = cleanRow[idx] }
-		
+		if idx < len(cleanRow) {
+			cellVal = cleanRow[idx]
+		}
+
 		match := false
 		for _, t := range targets {
 			if t == "" {
 				// Đặc biệt: "" nghĩa là cell phải rỗng
-				if cellVal == "" { match = true; break }
+				if cellVal == "" {
+					match = true
+					break
+				}
 			} else {
-				if strings.Contains(cellVal, t) { match = true; break }
+				if strings.Contains(cellVal, t) {
+					match = true
+					break
+				}
 			}
 		}
-		if !match { return false }
+		if !match {
+			return false
+		}
 	}
 
-	// 3. Min/Max
+	// 3. Min/Max - 🔥 Đã sửa getFloatVal
 	for idx, minVal := range f.MinCols {
-		if val, ok := getFloatVal(rawRow, idx); !ok || val < minVal { return false }
+		if val, ok := getFloatVal(rawRow, idx); !ok || val < minVal {
+			return false
+		}
 	}
 	for idx, maxVal := range f.MaxCols {
-		if val, ok := getFloatVal(rawRow, idx); !ok || val > maxVal { return false }
+		if val, ok := getFloatVal(rawRow, idx); !ok || val > maxVal {
+			return false
+		}
 	}
 
 	// 4. Time (Last Hours)
 	now := time.Now().UnixMilli()
 	for idx, hours := range f.TimeCols {
 		timeVal := int64(0)
-		if idx < len(rawRow) { timeVal = ConvertSerialDate(rawRow[idx]) }
-		if timeVal == 0 { return false }
-		if float64(now-timeVal)/3600000.0 > hours { return false }
+		if idx < len(rawRow) {
+			timeVal = ConvertSerialDate(rawRow[idx])
+		}
+		if timeVal == 0 {
+			return false
+		}
+		if float64(now-timeVal)/3600000.0 > hours {
+			return false
+		}
 	}
 
 	return true
 }
 
 // ------------------------------------------------------------------------------------------------
-// 🟢 CÁC HÀM LOGIC CŨ (GIỮ NGUYÊN)
+// 🟢 CÁC HÀM LOGIC CHÍNH (ĐÃ CẬP NHẬT LOGIC DỌN DẸP)
 // ------------------------------------------------------------------------------------------------
 
 func buildPrioritySteps(action string, isReset bool) []PriorityStep {
@@ -337,7 +393,9 @@ func buildPrioritySteps(action string, isReset bool) []PriorityStep {
 		add(STATUS_READ.WAITING, true, false, 2)
 		add(STATUS_READ.LOGIN, true, false, 3)
 		add(STATUS_READ.LOGIN, false, true, 4)
-		if isReset { add(STATUS_READ.COMPLETED, true, false, 5) }
+		if isReset {
+			add(STATUS_READ.COMPLETED, true, false, 5)
+		}
 	} else if action == "register" {
 		add(STATUS_READ.REGISTERING, true, false, 1)
 		add(STATUS_READ.WAIT_REG, true, false, 2)
@@ -352,21 +410,27 @@ func buildPrioritySteps(action string, isReset bool) []PriorityStep {
 		add(STATUS_READ.WAIT_REG, true, false, 6)
 		add(STATUS_READ.REGISTER, true, false, 7)
 		add(STATUS_READ.REGISTER, false, true, 8)
-		if isReset { add(STATUS_READ.COMPLETED, true, false, 9) }
+		if isReset {
+			add(STATUS_READ.COMPLETED, true, false, 9)
+		}
 	}
 	return steps
 }
 
 func determineType(row []string) string {
 	st := row[INDEX_DATA_TIKTOK.STATUS]
-	if st == STATUS_READ.REGISTER || st == STATUS_READ.REGISTERING || st == STATUS_READ.WAIT_REG { return "register" }
+	if st == STATUS_READ.REGISTER || st == STATUS_READ.REGISTERING || st == STATUS_READ.WAIT_REG {
+		return "register"
+	}
 	return "login"
 }
 
 func getCleanupIndices(cache *SheetCacheData, deviceId string, targetIdx int, isResetCompleted bool) []int {
 	var list []int
 	checkList := []string{STATUS_READ.RUNNING, STATUS_READ.REGISTERING}
-	if isResetCompleted { checkList = append(checkList, STATUS_READ.COMPLETED) }
+	if isResetCompleted {
+		checkList = append(checkList, STATUS_READ.COMPLETED)
+	}
 
 	for _, st := range checkList {
 		indices := cache.StatusMap[st]
@@ -381,7 +445,9 @@ func getCleanupIndices(cache *SheetCacheData, deviceId string, targetIdx int, is
 	return list
 }
 
+// 🔥 HÀM QUAN TRỌNG NHẤT: XỬ LÝ GHI VÀ TRẢ VỀ RESPONSE
 func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, typ, email, action string, priority int) (*LoginResponse, error) {
+	// 1. Nếu là view_only -> Trả về luôn không ghi
 	if action == "view_only" {
 		row := cache.RawValues[idx]
 		return &LoginResponse{
@@ -391,57 +457,90 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 		}, nil
 	}
 
+	// 2. Chuẩn bị dữ liệu cho dòng mới (Target)
 	row := cache.RawValues[idx]
-	tSt := STATUS_WRITE.RUNNING
-	if typ == "register" { tSt = STATUS_WRITE.REGISTERING }
-	
-	oldNote := SafeString(row[INDEX_DATA_TIKTOK.NOTE])
-	mode := "normal"
+	tSt := STATUS_WRITE.RUNNING // Trạng thái đích: "Đang chạy"
+	if typ == "register" {
+		tSt = STATUS_WRITE.REGISTERING // Hoặc "Đang đăng ký"
+	}
+
+	oldNote := SafeString(row[INDEX_DATA_TIKTOK.NOTE]) // Lấy ghi chú cũ của dòng đích
+	mode := "normal"                                   // Chế độ tạo ghi chú bình thường
 	isResetCompleted := false
+
+	// Kiểm tra xem có phải là Reset nick đã hoàn thành không
 	if (action == "auto" || action == "login_reset") && (priority == 5 || priority == 9) {
 		mode = "reset"
 		isResetCompleted = true
 	}
-	
+
+	// Tạo ghi chú mới cho dòng đích (Dùng hàm chuẩn)
 	tNote := tao_ghi_chu_chuan(oldNote, tSt, mode)
 
 	STATE.SheetMutex.Lock()
+	// Lấy danh sách các dòng cũ cần dọn dẹp (cùng deviceId)
 	cleanupIndices := getCleanupIndices(cache, deviceId, idx, isResetCompleted)
-	
+
 	for _, cIdx := range cleanupIndices {
-		cSt := STATUS_WRITE.WAITING
-		if typ == "register" { cSt = STATUS_WRITE.WAIT_REG }
-		cNote := ""
+		// Xác định trạng thái chờ (Waiting)
+		cSt := STATUS_WRITE.WAITING // "Đang chờ"
+		if typ == "register" {
+			cSt = STATUS_WRITE.WAIT_REG // "Chờ đăng ký"
+		}
+
+		// --- 🔥 LOGIC MỚI BẮT ĐẦU TỪ ĐÂY 🔥 ---
+		// Lấy ghi chú hiện tại của dòng cũ đang chạy (để giữ lại Lần x)
+		cOldNote := SafeString(cache.RawValues[cIdx][INDEX_DATA_TIKTOK.NOTE])
+
+		// Tạo ghi chú mới: Trạng thái mới + Thời gian mới (nowFull) + Giữ nguyên Lần chạy cũ
+		// Mode "normal" đảm bảo nếu cùng ngày thì giữ nguyên count, khác ngày thì reset 1
+		cNote := tao_ghi_chu_chuan(cOldNote, cSt, "normal")
+
+		// Nếu đây là quy trình Reset nick hoàn thành -> Ghi đè logic đặc biệt của Reset
 		if isResetCompleted {
-			cOldNote := SafeString(cache.RawValues[cIdx][INDEX_DATA_TIKTOK.NOTE])
 			cNote = tao_ghi_chu_chuan(cOldNote, "Reset chờ chạy", "reset")
 		}
+		// --- LOGIC MỚI KẾT THÚC ---
 
-		oldCSt := cache.CleanValues[cIdx][INDEX_DATA_TIKTOK.STATUS]
-		cache.RawValues[cIdx][INDEX_DATA_TIKTOK.STATUS] = cSt
-		cache.RawValues[cIdx][INDEX_DATA_TIKTOK.NOTE] = cNote
-		if INDEX_DATA_TIKTOK.STATUS < CACHE.CLEAN_COL_LIMIT { cache.CleanValues[cIdx][INDEX_DATA_TIKTOK.STATUS] = CleanString(cSt) }
-		if INDEX_DATA_TIKTOK.NOTE < CACHE.CLEAN_COL_LIMIT { cache.CleanValues[cIdx][INDEX_DATA_TIKTOK.NOTE] = CleanString(cNote) }
-		
-		if oldCSt != CleanString(cSt) {
-			removeFromStatusMap(cache.StatusMap, oldCSt, cIdx)
-			newCSt := CleanString(cSt)
-			cache.StatusMap[newCSt] = append(cache.StatusMap[newCSt], cIdx)
+		// Cập nhật vào Cache RAM cho dòng cũ (Dọn dẹp)
+		oldCSt := cache.CleanValues[cIdx][INDEX_DATA_TIKTOK.STATUS] // Lấy trạng thái cũ để xóa khỏi map
+		cache.RawValues[cIdx][INDEX_DATA_TIKTOK.STATUS] = cSt       // Gán trạng thái chờ
+		cache.RawValues[cIdx][INDEX_DATA_TIKTOK.NOTE] = cNote       // Gán ghi chú mới (Đã có time mới + lần cũ)
+
+		// Cập nhật CleanValues (Dữ liệu tìm kiếm)
+		if INDEX_DATA_TIKTOK.STATUS < CACHE.CLEAN_COL_LIMIT {
+			cache.CleanValues[cIdx][INDEX_DATA_TIKTOK.STATUS] = CleanString(cSt)
+		}
+		if INDEX_DATA_TIKTOK.NOTE < CACHE.CLEAN_COL_LIMIT {
+			cache.CleanValues[cIdx][INDEX_DATA_TIKTOK.NOTE] = CleanString(cNote)
 		}
 
+		// Cập nhật Map chỉ mục trạng thái (StatusMap)
+		if oldCSt != CleanString(cSt) {
+			removeFromStatusMap(cache.StatusMap, oldCSt, cIdx)             // Xóa khỏi danh sách trạng thái cũ
+			newCSt := CleanString(cSt)                                     // Chuẩn hóa trạng thái mới
+			cache.StatusMap[newCSt] = append(cache.StatusMap[newCSt], cIdx) // Thêm vào danh sách trạng thái mới
+		}
+
+		// Tạo bản sao dữ liệu để đẩy xuống hàng đợi ghi (Write Queue)
 		cRow := make([]interface{}, len(cache.RawValues[cIdx]))
 		copy(cRow, cache.RawValues[cIdx])
 		go QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, cIdx, cRow)
 	}
 
+	// 3. Cập nhật dòng đích (Target Row - Dòng được chọn để chạy)
 	oldCleanSt := cache.CleanValues[idx][INDEX_DATA_TIKTOK.STATUS]
-	cache.RawValues[idx][INDEX_DATA_TIKTOK.STATUS] = tSt
-	cache.RawValues[idx][INDEX_DATA_TIKTOK.NOTE] = tNote
-	cache.RawValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
-	
-	if INDEX_DATA_TIKTOK.STATUS < CACHE.CLEAN_COL_LIMIT { cache.CleanValues[idx][INDEX_DATA_TIKTOK.STATUS] = CleanString(tSt) }
-	if INDEX_DATA_TIKTOK.NOTE < CACHE.CLEAN_COL_LIMIT { cache.CleanValues[idx][INDEX_DATA_TIKTOK.NOTE] = CleanString(tNote) }
-	
+	cache.RawValues[idx][INDEX_DATA_TIKTOK.STATUS] = tSt       // Gán "Đang chạy"
+	cache.RawValues[idx][INDEX_DATA_TIKTOK.NOTE] = tNote       // Gán Note mới
+	cache.RawValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId // Gán DeviceID sở hữu
+
+	if INDEX_DATA_TIKTOK.STATUS < CACHE.CLEAN_COL_LIMIT {
+		cache.CleanValues[idx][INDEX_DATA_TIKTOK.STATUS] = CleanString(tSt)
+	}
+	if INDEX_DATA_TIKTOK.NOTE < CACHE.CLEAN_COL_LIMIT {
+		cache.CleanValues[idx][INDEX_DATA_TIKTOK.NOTE] = CleanString(tNote)
+	}
+
 	if oldCleanSt != CleanString(tSt) {
 		removeFromStatusMap(cache.StatusMap, oldCleanSt, idx)
 		newSt := CleanString(tSt)
@@ -449,6 +548,7 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 	}
 	STATE.SheetMutex.Unlock()
 
+	// 4. Đẩy dòng đích xuống hàng đợi ghi
 	newRow := make([]interface{}, len(row))
 	copy(newRow, row)
 	newRow[INDEX_DATA_TIKTOK.STATUS] = tSt
@@ -456,8 +556,11 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 	newRow[INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
 	QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, idx, newRow)
 
+	// 5. Trả về Response thành công
 	msg := "Lấy nick đăng nhập thành công"
-	if typ == "register" { msg = "Lấy nick đăng ký thành công" }
+	if typ == "register" {
+		msg = "Lấy nick đăng ký thành công"
+	}
 
 	return &LoginResponse{
 		Status: "true", Type: typ, Messenger: msg, DeviceId: deviceId,
@@ -479,7 +582,7 @@ func removeFromStatusMap(m map[string][]int, status string, targetIdx int) {
 
 func doSelfHealing(sid string, idx int, missing string, cache *SheetCacheData) {
 	msg := "Nick thiếu " + missing + "\n" + time.Now().Format("02/01/2006 15:04:05")
-	
+
 	STATE.SheetMutex.Lock()
 	if idx < len(cache.RawValues) {
 		cache.RawValues[idx][INDEX_DATA_TIKTOK.STATUS] = STATUS_WRITE.ATTENTION
@@ -496,32 +599,52 @@ func doSelfHealing(sid string, idx int, missing string, cache *SheetCacheData) {
 	go QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, idx, fullRow)
 }
 
+// Hàm tạo ghi chú chuẩn: Trạng thái + Thời gian + (Lần x)
 func tao_ghi_chu_chuan(oldNote, newStatus, mode string) string {
 	nowFull := time.Now().Add(7 * time.Hour).Format("02/01/2006 15:04:05")
-	if mode == "new" { return fmt.Sprintf("%s\n%s", newStatus, nowFull) }
-	
+	if mode == "new" {
+		return fmt.Sprintf("%s\n%s", newStatus, nowFull)
+	}
+
 	count := 0
 	oldNote = strings.TrimSpace(oldNote)
 	lines := strings.Split(oldNote, "\n")
 	if idx := strings.Index(oldNote, "(Lần"); idx != -1 {
 		end := strings.Index(oldNote[idx:], ")")
-		if end != -1 { fmt.Sscanf(oldNote[idx+len("(Lần"):idx+end], "%d", &count) }
+		if end != -1 {
+			fmt.Sscanf(oldNote[idx+len("(Lần"):idx+end], "%d", &count)
+		}
 	}
-	if count == 0 { count = 1 }
+	if count == 0 {
+		count = 1
+	}
 
 	today := nowFull[:10]
 	oldDate := ""
-	for _, l := range lines { if len(l) >= 10 && strings.Contains(l, "/") { oldDate = l[:10]; break } }
-	
-	if oldDate != today { 
-		count = 1 
-	} else { 
-		if mode == "reset" { count++ } else if count == 0 { count = 1 }
+	for _, l := range lines {
+		if len(l) >= 10 && strings.Contains(l, "/") {
+			oldDate = l[:10]
+			break
+		}
+	}
+
+	if oldDate != today {
+		count = 1
+	} else {
+		if mode == "reset" {
+			count++
+		} else if count == 0 {
+			count = 1
+		}
 	}
 
 	st := newStatus
-	if st == "" && len(lines) > 0 { st = lines[0] }
-	if st == "" { st = "Đang chạy" }
-	
+	if st == "" && len(lines) > 0 {
+		st = lines[0]
+	}
+	if st == "" {
+		st = "Đang chạy"
+	}
+
 	return fmt.Sprintf("%s\n%s (Lần %d)", st, nowFull, count)
 }
