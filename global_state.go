@@ -27,7 +27,7 @@ var STATE = struct {
 	WriteQueue: make(map[string]*WriteQueueData),
 }
 
-// 🔥 Struct trả về kết quả Auth (Fix lỗi undefined)
+// 🔥 BỔ SUNG AUTH RESULT
 type AuthResult struct {
 	IsValid       bool
 	Messenger     string
@@ -54,11 +54,12 @@ type RateLimitData struct {
 	LastReset int64
 }
 
+// Cấu trúc Cache Phân Vùng (Partitioned)
 type SheetCacheData struct {
 	RawValues      [][]interface{}
 	CleanValues    [][]string
-	AssignedMap    map[string]int   // Map DeviceID -> Index
-	UnassignedList []int            // List Index trống
+	AssignedMap    map[string]int   // Map DeviceID -> RowIndex
+	UnassignedList []int            // List Index của nick trống
 	StatusMap      map[string][]int // Map Status -> List Index
 	LastAccessed   int64
 	Timestamp      int64
