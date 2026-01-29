@@ -81,6 +81,11 @@ type QualityResult struct {
 	Missing     string
 }
 
+func GetFloatVal(row []interface{}, idx int) (float64, bool) {
+	if idx >= len(row) { return 0, false }
+	return toFloat(row[idx])
+}
+
 func KiemTraChatLuongClean(cleanRow []string, action string) QualityResult {
 	if len(cleanRow) <= INDEX_DATA_TIKTOK.EMAIL { return QualityResult{false, "", "data_length"} }
 	rawEmail := cleanRow[INDEX_DATA_TIKTOK.EMAIL]
