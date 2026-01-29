@@ -1,125 +1,221 @@
 package main
 
 import (
-	"fmt"
-	"math"
+	"encoding/json"
+	"fmt" // 🔥 ĐÃ BỔ SUNG IMPORT NÀY
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
 )
 
-func CleanString(v interface{}) string {
-	if v == nil {
-		return ""
+func HandleSearchData(w http.ResponseWriter, r *http.Request) {
+	var body map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"status":"false","messenger":"Lỗi Body JSON"}`, 400)
+		return
 	}
-	return strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", v)))
-}
 
-func SafeString(v interface{}) string {
-	if v == nil {
-		return ""
+	tokenData, ok := r.Context().Value("tokenData").(*TokenData)
+	if !ok {
+		http.Error(w, `{"status":"false","messenger":"Lỗi xác thực"}`, 401)
+		return
 	}
-	return strings.TrimSpace(fmt.Sprintf("%v", v))
-}
 
-// 🔥 BỔ SUNG HÀM NÀY (Để sửa lỗi undefined: ConvertSerialDate)
-func ConvertSerialDate(v interface{}) int64 {
-	// Nếu là chuỗi ngày tháng dạng "dd/mm/yyyy"
-	s := fmt.Sprintf("%v", v)
-	if strings.Contains(s, "/") {
-		t, err := time.ParseInLocation("02/01/2006", s, time.FixedZone("UTC+7", 7*3600))
-		if err == nil {
-			return t.UnixMilli()
+	sid := tokenData.SpreadsheetID
+	sheetName := CleanString(body["sheet"])
+	if sheetName == "" {
+		sheetName = SHEET_NAMES.DATA_TIKTOK
+	}
+
+	cacheData, err := LayDuLieu(sid, sheetName, false)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": "Lỗi tải dữ liệu"})
+		return
+	}
+
+	// Parse Criteria
+	criteriaMatch := make(map[int][]string)
+	criteriaContains := make(map[int][]string)
+	criteriaMin := make(map[int]float64)
+	criteriaMax := make(map[int]float64)
+	criteriaTime := make(map[int]float64)
+
+	for k, v := range body {
+		if strings.HasPrefix(k, "match_col_") {
+			idx, _ := strconv.Atoi(k[10:])
+			if arr := parseConditionInput(v); len(arr) > 0 {
+				criteriaMatch[idx] = arr
+			}
+		} else if strings.HasPrefix(k, "contains_col_") {
+			idx, _ := strconv.Atoi(k[13:])
+			if arr := parseConditionInput(v); len(arr) > 0 {
+				criteriaContains[idx] = arr
+			}
+		} else if strings.HasPrefix(k, "min_col_") {
+			idx, _ := strconv.Atoi(k[8:])
+			if val, ok := toFloat(v); ok {
+				criteriaMin[idx] = val
+			}
+		} else if strings.HasPrefix(k, "max_col_") {
+			idx, _ := strconv.Atoi(k[8:])
+			if val, ok := toFloat(v); ok {
+				criteriaMax[idx] = val
+			}
+		} else if strings.HasPrefix(k, "last_hours_col_") {
+			idx, _ := strconv.Atoi(k[15:])
+			if val, ok := toFloat(v); ok {
+				criteriaTime[idx] = val
+			}
 		}
-		// Thử có giờ
-		t2, err2 := time.ParseInLocation("02/01/2006 15:04:05", s, time.FixedZone("UTC+7", 7*3600))
-		if err2 == nil {
-			return t2.UnixMilli()
+	}
+
+	limit := 1000
+	if l, ok := body["limit"]; ok {
+		if val, ok := toFloat(l); ok && val > 0 {
+			limit = int(val)
 		}
 	}
 
-	// Nếu là số Serial Excel (ví dụ 45000.123)
-	val, ok := 0.0, false
-	if f, isFloat := v.(float64); isFloat {
-		val = f
-		ok = true
-	} else if str, isString := v.(string); isString {
-		if f, err := strconv.ParseFloat(str, 64); err == nil {
-			val = f
-			ok = true
+	result := make(map[int]map[string]interface{})
+	count := 0
+
+	// 🔥 DÙNG GLOBAL LOCK THAY VÌ CACHE LOCK
+	STATE.SheetMutex.RLock()
+	defer STATE.SheetMutex.RUnlock()
+
+	now := time.Now().UnixMilli()
+	rows := cacheData.RawValues
+	cleanRows := cacheData.CleanValues
+
+	for i, row := range rows {
+		if count >= limit {
+			break
 		}
+		match := true
+
+		// 1. Check Match
+		for idx, arr := range criteriaMatch {
+			cellVal := ""
+			if idx < len(cleanRows[i]) {
+				cellVal = cleanRows[i][idx]
+			}
+			found := false
+			for _, target := range arr {
+				if target == cellVal {
+					found = true
+					break
+				}
+			}
+			if !found {
+				match = false
+				break
+			}
+		}
+		if !match { continue }
+
+		// 2. Check Contains
+		for idx, arr := range criteriaContains {
+			cellVal := ""
+			if idx < len(cleanRows[i]) {
+				cellVal = cleanRows[i][idx]
+			}
+			found := false
+			for _, target := range arr {
+				if strings.Contains(cellVal, target) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				match = false
+				break
+			}
+		}
+		if !match { continue }
+
+		// 3. Check Min/Max
+		for idx, minVal := range criteriaMin {
+			if val, ok := getFloatVal(row, idx); !ok || val < minVal {
+				match = false
+				break
+			}
+		}
+		if !match { continue }
+		for idx, maxVal := range criteriaMax {
+			if val, ok := getFloatVal(row, idx); !ok || val > maxVal {
+				match = false
+				break
+			}
+		}
+		if !match { continue }
+
+		// 4. Check Time
+		for idx, hours := range criteriaTime {
+			timeVal := int64(0)
+			if idx < len(row) {
+				timeVal = ConvertSerialDate(row[idx]) // 🔥 Dùng hàm vừa thêm ở utils.go
+			}
+			if timeVal == 0 {
+				match = false
+				break
+			}
+			diffHours := float64(now-timeVal) / 3600000.0
+			if diffHours > hours {
+				match = false
+				break
+			}
+		}
+		if !match { continue }
+
+		item := make(map[string]interface{})
+		item["row_index"] = i + RANGES.DATA_START_ROW
+		result[count] = item
+		count++
 	}
 
-	if ok && val > 0 {
-		// Excel base date: Dec 30, 1899
-		base := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
-		days := int(val)
-		fraction := val - float64(days)
-		seconds := int(fraction * 86400)
-		
-		t := base.AddDate(0, 0, days).Add(time.Duration(seconds) * time.Second)
-		// Trừ đi 7 tiếng nếu Excel đang hiểu là Local Time, nhưng Server là UTC
-		// Hoặc đơn giản trả về UnixMilli
-		return t.UnixMilli()
-	}
-	
-	return 0
-}
-
-// --- CÁC STRUCT PROFILE (GIỮ NGUYÊN) ---
-type AuthProfile struct {
-	UID      string `json:"uid"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
-	User     string `json:"user"`
-	TwoFA    string `json:"2fa"`
-	Cookie   string `json:"cookie"`
-	Token    string `json:"token"`
-}
-
-type ActivityProfile struct {
-	LastActive string `json:"last_active"`
-	PostCount  string `json:"post_count"`
-	Follower   string `json:"follower"`
-}
-
-type AiProfile struct {
-	Signature string `json:"signature"`
-	Persona   string `json:"persona"`
-	Target    string `json:"target"`
-}
-
-func MakeAuthProfile(row []interface{}) AuthProfile {
-	return AuthProfile{
-		UID:      getString(row, INDEX_DATA_TIKTOK.USER_ID),
-		Email:    getString(row, INDEX_DATA_TIKTOK.EMAIL),
-		Password: getString(row, INDEX_DATA_TIKTOK.PASSWORD),
-		User:     getString(row, INDEX_DATA_TIKTOK.USER_NAME),
-		TwoFA:    getString(row, INDEX_DATA_TIKTOK.TWO_FA),
-		Cookie:   getString(row, INDEX_DATA_TIKTOK.COOKIE),
-		Token:    getString(row, INDEX_DATA_TIKTOK.ACCESS_TOKEN),
+	if count == 0 {
+		json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": "Không tìm thấy dữ liệu"})
+	} else {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":    "true",
+			"messenger": "Lấy dữ liệu thành công",
+			"data":      result,
+		})
 	}
 }
 
-func MakeActivityProfile(row []interface{}) ActivityProfile {
-	return ActivityProfile{
-		LastActive: getString(row, INDEX_DATA_TIKTOK.LAST_ACTIVE_DATE),
-		PostCount:  getString(row, INDEX_DATA_TIKTOK.VIDEO_COUNT),
-		Follower:   getString(row, INDEX_DATA_TIKTOK.FOLLOWER_COUNT),
+func parseConditionInput(v interface{}) []string {
+	if s, ok := v.(string); ok {
+		return []string{CleanString(s)}
 	}
+	if arr, ok := v.([]interface{}); ok {
+		res := []string{}
+		for _, item := range arr {
+			res = append(res, CleanString(item))
+		}
+		return res
+	}
+	return []string{}
 }
 
-func MakeAiProfile(row []interface{}) AiProfile {
-	return AiProfile{
-		Signature: getString(row, INDEX_DATA_TIKTOK.SIGNATURE),
-		Persona:   getString(row, INDEX_DATA_TIKTOK.AI_PERSONA),
-		Target:    getString(row, INDEX_DATA_TIKTOK.TARGET_AUDIENCE),
+func toFloat(v interface{}) (float64, bool) {
+	if f, ok := v.(float64); ok {
+		return f, true
 	}
+	return 0, false
 }
 
-func getString(row []interface{}, idx int) string {
-	if idx >= 0 && idx < len(row) {
-		return fmt.Sprintf("%v", row[idx])
+func getFloatVal(row []interface{}, idx int) (float64, bool) {
+	if idx >= len(row) {
+		return 0, false
 	}
-	return ""
+	if f, ok := row[idx].(float64); ok {
+		return f, true
+	}
+	s := fmt.Sprintf("%v", row[idx])
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return f, true
+	}
+	return 0, false
 }
