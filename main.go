@@ -96,3 +96,37 @@ func main() {
 	STATE.QueueMutex.Unlock()
 	fmt.Println("✅ Shutdown complete.")
 }
+
+// utils.go hoặc thêm vào cuối file main.go
+package main
+
+import (
+	"fmt"
+	"strconv"
+)
+
+func getFloatVal(v interface{}) float64 {
+	if v == nil {
+		return 0
+	}
+	switch i := v.(type) {
+	case float64:
+		return i
+	case float32:
+		return float64(i)
+	case int:
+		return float64(i)
+	case int64:
+		return float64(i)
+	case string:
+		f, err := strconv.ParseFloat(i, 64)
+		if err != nil {
+			return 0
+		}
+		return f
+	default:
+		// Nếu cần debug thì uncomment dòng dưới
+		// fmt.Printf("Unknown type for getFloatVal: %T\n", v)
+		return 0
+	}
+}
