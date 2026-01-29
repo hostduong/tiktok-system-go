@@ -11,52 +11,51 @@ import (
 // --- 1. CÁC HÀM TIỆN ÍCH CƠ BẢN ---
 
 func CleanString(v interface{}) string {
-	if v == nil { return "" }
+	if v == nil {
+		return ""
+	}
 	return strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", v)))
 }
 
 func SafeString(v interface{}) string {
-	if v == nil { return "" }
+	if v == nil {
+		return ""
+	}
 	return strings.TrimSpace(fmt.Sprintf("%v", v))
 }
 
+// Hàm chuyển đổi giá trị đơn lẻ sang float
 func toFloat(v interface{}) (float64, bool) {
-	if f, ok := v.(float64); ok { return f, true }
+	if f, ok := v.(float64); ok {
+		return f, true
+	}
 	if s, ok := v.(string); ok {
-		if f, err := strconv.ParseFloat(s, 64); err == nil { return f, true }
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return f, true
+		}
 	}
 	return 0, false
 }
 
-func getFloatVal(v interface{}) float64 {
-	if v == nil {
-		return 0
+// 🔥 FIX QUAN TRỌNG: Hàm này giờ nhận vào (Dòng, Cột) để khớp với code trong Handler
+func getFloatVal(row []interface{}, idx int) (float64, bool) {
+	if idx < 0 || idx >= len(row) {
+		return 0, false
 	}
-	switch i := v.(type) {
-	case float64:
-		return i
-	case float32:
-		return float64(i)
-	case int:
-		return float64(i)
-	case int64:
-		return float64(i)
-	case string:
-		f, err := strconv.ParseFloat(i, 64)
-		if err != nil {
-			return 0
-		}
-		return f
-	default:
-		return 0
-	}
+	return toFloat(row[idx])
 }
 
+// Giữ lại để tương thích nếu có chỗ gọi viết hoa
+func GetFloatVal(row []interface{}, idx int) (float64, bool) {
+	return getFloatVal(row, idx)
+}
 
-// 🔥 Helper mới: Chuyển Input (String hoặc Array) thành Slice String chuẩn
+// Chuyển Input (String hoặc Array) thành Slice String chuẩn
 func ToSlice(v interface{}) []string {
-	if v == nil { return []string{} }
-	
+	if v == nil {
+		return []string{}
+	}
+
 	// Nếu là mảng []interface{} (do JSON decode)
 	if arr, ok := v.([]interface{}); ok {
 		res := make([]string, len(arr))
@@ -65,30 +64,39 @@ func ToSlice(v interface{}) []string {
 		}
 		return res
 	}
-	
+
 	// Nếu là string đơn lẻ
 	s := CleanString(v)
-	if s != "" { return []string{s} }
-	
+	if s != "" {
+		return []string{s}
+	}
+
 	// Trường hợp đặc biệt: Input là "" nhưng user muốn filter rỗng -> Vẫn trả về mảng chứa ""
 	if s == "" {
-		// Kiểm tra xem v có thực sự là chuỗi rỗng không hay là nil
 		if strVal, ok := v.(string); ok && strVal == "" {
 			return []string{""}
 		}
 	}
-	
+
 	return []string{}
 }
 
 func ConvertSerialDate(v interface{}) int64 {
 	s := fmt.Sprintf("%v", v)
 	if strings.Contains(s, "/") {
-		if t, err := time.ParseInLocation("02/01/2006 15:04:05", s, time.FixedZone("UTC+7", 7*3600)); err == nil { return t.UnixMilli() }
-		if t, err := time.ParseInLocation("02/01/2006", s, time.FixedZone("UTC+7", 7*3600)); err == nil { return t.UnixMilli() }
+		if t, err := time.ParseInLocation("02/01/2006 15:04:05", s, time.FixedZone("UTC+7", 7*3600)); err == nil {
+			return t.UnixMilli()
+		}
+		if t, err := time.ParseInLocation("02/01/2006", s, time.FixedZone("UTC+7", 7*3600)); err == nil {
+			return t.UnixMilli()
+		}
 	}
 	val := 0.0
-	if f, ok := v.(float64); ok { val = f } else if f, err := strconv.ParseFloat(s, 64); err == nil { val = f }
+	if f, ok := v.(float64); ok {
+		val = f
+	} else if f, err := strconv.ParseFloat(s, 64); err == nil {
+		val = f
+	}
 	if val > 0 {
 		t := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
 		days := int(math.Floor(val))
@@ -106,25 +114,44 @@ type QualityResult struct {
 	Missing     string
 }
 
-func GetFloatVal(row []interface{}, idx int) (float64, bool) {
-	if idx >= len(row) { return 0, false }
-	return toFloat(row[idx])
-}
-
 func KiemTraChatLuongClean(cleanRow []string, action string) QualityResult {
-	if len(cleanRow) <= INDEX_DATA_TIKTOK.EMAIL { return QualityResult{false, "", "data_length"} }
+	if len(cleanRow) <= INDEX_DATA_TIKTOK.EMAIL {
+		return QualityResult{false, "", "data_length"}
+	}
 	rawEmail := cleanRow[INDEX_DATA_TIKTOK.EMAIL]
 	sysEmail := ""
-	if strings.Contains(rawEmail, "@") { parts := strings.Split(rawEmail, "@"); if len(parts) > 1 { sysEmail = parts[1] } }
-	if action == "view_only" { return QualityResult{true, sysEmail, ""} }
-	
+	if strings.Contains(rawEmail, "@") {
+		parts := strings.Split(rawEmail, "@")
+		if len(parts) > 1 {
+			sysEmail = parts[1]
+		}
+	}
+	if action == "view_only" {
+		return QualityResult{true, sysEmail, ""}
+	}
+
 	hasEmail := (rawEmail != "")
 	hasUser := (cleanRow[INDEX_DATA_TIKTOK.USER_NAME] != "")
 	hasPass := (cleanRow[INDEX_DATA_TIKTOK.PASSWORD] != "")
 
-	if strings.Contains(action, "register") { if hasEmail { return QualityResult{true, sysEmail, ""} }; return QualityResult{false, "", "email"} }
-	if strings.Contains(action, "login") { if (hasEmail || hasUser) && hasPass { return QualityResult{true, sysEmail, ""} }; return QualityResult{false, "", "user/pass"} }
-	if action == "auto" { if hasEmail || ((hasUser || hasEmail) && hasPass) { return QualityResult{true, sysEmail, ""} }; return QualityResult{false, "", "data"} }
+	if strings.Contains(action, "register") {
+		if hasEmail {
+			return QualityResult{true, sysEmail, ""}
+		}
+		return QualityResult{false, "", "email"}
+	}
+	if strings.Contains(action, "login") {
+		if (hasEmail || hasUser) && hasPass {
+			return QualityResult{true, sysEmail, ""}
+		}
+		return QualityResult{false, "", "user/pass"}
+	}
+	if action == "auto" {
+		if hasEmail || ((hasUser || hasEmail) && hasPass) {
+			return QualityResult{true, sysEmail, ""}
+		}
+		return QualityResult{false, "", "data"}
+	}
 	return QualityResult{false, "", "unknown"}
 }
 
@@ -204,7 +231,9 @@ type AiProfile struct {
 }
 
 func gs(row []interface{}, idx int) string {
-	if idx >= 0 && idx < len(row) { return fmt.Sprintf("%v", row[idx]) }
+	if idx >= 0 && idx < len(row) {
+		return fmt.Sprintf("%v", row[idx])
+	}
 	return ""
 }
 
@@ -240,9 +269,7 @@ func MakeAiProfile(row []interface{}) AiProfile {
 
 // Mapping dùng cho update
 func getKeyName(idx int) string {
-	// ... (Giữ nguyên như cũ nếu cần, hoặc dùng Struct trên kia)
-	// Để đơn giản, handler_update sẽ dùng các hàm Make... trả về Struct,
-	// sau đó encode JSON thì key sẽ tự đúng theo tag `json:"..."`.
-	return "" 
+	return ""
 }
-func AnhXaAuth(row []interface{}) map[string]interface{} { return nil } // Placeholder để tương thích code cũ nếu có
+
+func AnhXaAuth(row []interface{}) map[string]interface{} { return nil }
