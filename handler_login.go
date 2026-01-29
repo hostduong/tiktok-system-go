@@ -374,11 +374,6 @@ func doSelfHealing(sid string, idx int, missing string, cache *SheetCacheData) {
 	go QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, idx, fullRow)
 }
 
-func toFloat(v interface{}) (float64, bool) {
-	if f, ok := v.(float64); ok { return f, true }
-	return 0, false
-}
-
 type QualityResult struct { Valid bool; SystemEmail string; Missing string }
 func kiem_tra_chat_luong_clean(cleanRow []string, action string) QualityResult {
 	if len(cleanRow) <= INDEX_DATA_TIKTOK.EMAIL { return QualityResult{false, "", "data_length"} }
