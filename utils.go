@@ -43,11 +43,7 @@ func ConvertSerialDate(v interface{}) int64 {
 	return 0
 }
 
-// =================================================================================================
-// 📦 BỘ MAPPING DỮ LIỆU ĐỘNG (FULL 61 TRƯỜNG)
-// =================================================================================================
-
-// Helper để lấy tên cột từ Index (Dùng switch case cho nhanh thay vì reflect)
+// Helper lấy tên cột từ Index
 func getKeyName(idx int) string {
 	switch idx {
 	case 0: return "status"; case 1: return "note"; case 2: return "device_id"; case 3: return "user_id"; case 4: return "user_sec"; case 5: return "user_name"; case 6: return "email";
@@ -98,4 +94,25 @@ func AnhXaAi(row []interface{}) map[string]interface{} {
 		if key != "" { res[key] = getString(row, i) }
 	}
 	return res
+}
+
+// Type QualityResult để dùng chung
+type QualityResult struct { Valid bool; SystemEmail string; Missing string }
+
+// Hàm kiểm tra chất lượng nick (dùng chung)
+func kiem_tra_chat_luong_clean(cleanRow []string, action string) QualityResult {
+	if len(cleanRow) <= INDEX_DATA_TIKTOK.EMAIL { return QualityResult{false, "", "data_length"} }
+	rawEmail := cleanRow[INDEX_DATA_TIKTOK.EMAIL]
+	sysEmail := ""
+	if strings.Contains(rawEmail, "@") { parts := strings.Split(rawEmail, "@"); if len(parts) > 1 { sysEmail = parts[1] } }
+	if action == "view_only" { return QualityResult{true, sysEmail, ""} }
+	
+	hasEmail := (rawEmail != "")
+	hasUser := (cleanRow[INDEX_DATA_TIKTOK.USER_NAME] != "")
+	hasPass := (cleanRow[INDEX_DATA_TIKTOK.PASSWORD] != "")
+
+	if strings.Contains(action, "register") { if hasEmail { return QualityResult{true, sysEmail, ""} }; return QualityResult{false, "", "email"} }
+	if strings.Contains(action, "login") { if (hasEmail || hasUser) && hasPass { return QualityResult{true, sysEmail, ""} }; return QualityResult{false, "", "user/pass"} }
+	if action == "auto" { if hasEmail || ((hasUser || hasEmail) && hasPass) { return QualityResult{true, sysEmail, ""} }; return QualityResult{false, "", "data"} }
+	return QualityResult{false, "", "unknown"}
 }
