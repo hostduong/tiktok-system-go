@@ -135,10 +135,7 @@ func parseConditionInput(v interface{}) []string {
 	}
 	return []string{}
 }
-func toFloat(v interface{}) (float64, bool) {
-	if f, ok := v.(float64); ok { return f, true }
-	return 0, false
-}
+
 func getFloatVal(row []interface{}, idx int) (float64, bool) {
 	if idx >= len(row) { return 0, false }
 	if f, ok := row[idx].(float64); ok { return f, true }
