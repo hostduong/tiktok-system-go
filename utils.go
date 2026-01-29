@@ -18,34 +18,20 @@ func SafeString(v interface{}) string {
 	return strings.TrimSpace(fmt.Sprintf("%v", v))
 }
 
-// 🔥 HÀM QUAN TRỌNG: ConvertSerialDate (Port 100% từ Node.js chuyen_doi_thoi_gian)
-// Fix lỗi undefined trong handler_mail.go và handler_search.go
+// Hàm này BẮT BUỘC phải có để dùng math & strconv
 func ConvertSerialDate(v interface{}) int64 {
-	if v == nil { return 0 }
-	
-	// Case 1: Số (Excel Serial Date)
-	// Node.js logic: (v - 25569) * 86400000 - (7 * 3600000)
-	if f, ok := v.(float64); ok {
-		return int64((f - 25569) * 86400000) - (7 * 3600000)
-	}
-	
-	// Case 2: String
 	s := fmt.Sprintf("%v", v)
-	// Node.js logic: Date.UTC(...)
-	// Golang: ParseInLocation với múi giờ UTC+7
-	if strings.Contains(s, "/") || strings.Contains(s, "-") || strings.Contains(s, ":") {
-		// Thử các format phổ biến
-		layouts := []string{
-			"02/01/2006 15:04:05",
-			"02/01/2006",
-			"2006-01-02 15:04:05",
-		}
-		loc := time.FixedZone("UTC+7", 7*3600)
-		for _, l := range layouts {
-			if t, err := time.ParseInLocation(l, s, loc); err == nil {
-				return t.UnixMilli()
-			}
-		}
+	if strings.Contains(s, "/") {
+		if t, err := time.ParseInLocation("02/01/2006 15:04:05", s, time.FixedZone("UTC+7", 7*3600)); err == nil { return t.UnixMilli() }
+		if t, err := time.ParseInLocation("02/01/2006", s, time.FixedZone("UTC+7", 7*3600)); err == nil { return t.UnixMilli() }
+	}
+	val := 0.0
+	if f, ok := v.(float64); ok { val = f } else if f, err := strconv.ParseFloat(s, 64); err == nil { val = f }
+	if val > 0 {
+		t := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
+		days := int(math.Floor(val)) // Dùng math ở đây
+		seconds := int((val - float64(days)) * 86400)
+		return t.AddDate(0, 0, days).Add(time.Duration(seconds) * time.Second).UnixMilli()
 	}
 	return 0
 }
