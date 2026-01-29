@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+// --- 1. CÁC HÀM TIỆN ÍCH CƠ BẢN ---
+
 func CleanString(v interface{}) string {
 	if v == nil { return "" }
 	return strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", v)))
@@ -18,6 +20,7 @@ func SafeString(v interface{}) string {
 	return strings.TrimSpace(fmt.Sprintf("%v", v))
 }
 
+// 🔥 Hàm này chuyển vào utils để dùng chung, tránh lỗi redeclared
 func toFloat(v interface{}) (float64, bool) {
 	if f, ok := v.(float64); ok { return f, true }
 	if s, ok := v.(string); ok {
@@ -43,11 +46,67 @@ func ConvertSerialDate(v interface{}) int64 {
 	return 0
 }
 
-// =================================================================================================
-// 📦 STRUCT PROFILE FULL 61 TRƯỜNG (ĐÚNG THỨ TỰ)
-// =================================================================================================
+// --- 2. HÀM KIỂM TRA CHẤT LƯỢNG NICK (Đã thêm vào đây) ---
 
-// AuthProfile: Cột 0 -> 22
+type QualityResult struct {
+	Valid       bool
+	SystemEmail string
+	Missing     string
+}
+
+// 🔥 Hàm này ĐÃ CÓ MẶT ở đây để các file khác gọi
+func KiemTraChatLuongClean(cleanRow []string, action string) QualityResult {
+	// Kiểm tra độ dài dữ liệu
+	if len(cleanRow) <= INDEX_DATA_TIKTOK.EMAIL {
+		return QualityResult{false, "", "data_length"}
+	}
+
+	rawEmail := cleanRow[INDEX_DATA_TIKTOK.EMAIL]
+	sysEmail := ""
+	if strings.Contains(rawEmail, "@") {
+		parts := strings.Split(rawEmail, "@")
+		if len(parts) > 1 {
+			sysEmail = parts[1]
+		}
+	}
+
+	// Nếu chỉ view, luôn valid
+	if action == "view_only" {
+		return QualityResult{true, sysEmail, ""}
+	}
+
+	hasEmail := (rawEmail != "")
+	hasUser := (cleanRow[INDEX_DATA_TIKTOK.USER_NAME] != "")
+	hasPass := (cleanRow[INDEX_DATA_TIKTOK.PASSWORD] != "")
+
+	if strings.Contains(action, "register") {
+		if hasEmail {
+			return QualityResult{true, sysEmail, ""}
+		}
+		return QualityResult{false, "", "email"}
+	}
+
+	if strings.Contains(action, "login") {
+		if (hasEmail || hasUser) && hasPass {
+			return QualityResult{true, sysEmail, ""}
+		}
+		return QualityResult{false, "", "user/pass"}
+	}
+
+	if action == "auto" {
+		// Auto: Cần Email OR (User & Pass)
+		if hasEmail || ((hasUser || hasEmail) && hasPass) {
+			return QualityResult{true, sysEmail, ""}
+		}
+		return QualityResult{false, "", "data"}
+	}
+
+	return QualityResult{false, "", "unknown"}
+}
+
+// --- 3. STRUCT & MAPPING 61 TRƯỜNG (FULL) ---
+
+// AuthProfile: 23 trường đầu (Index 0-22)
 type AuthProfile struct {
 	Status        string `json:"status"`
 	Note          string `json:"note"`
@@ -74,7 +133,7 @@ type AuthProfile struct {
 	CreateTime    string `json:"create_time"`
 }
 
-// ActivityProfile: Cột 23 -> 44
+// ActivityProfile: 22 trường tiếp theo (Index 23-44)
 type ActivityProfile struct {
 	StatusPost       string `json:"status_post"`
 	DailyPostLimit   string `json:"daily_post_limit"`
@@ -100,7 +159,7 @@ type ActivityProfile struct {
 	CommissionRate   string `json:"commission_rate"`
 }
 
-// AiProfile: Cột 45 -> 60
+// AiProfile: 16 trường cuối (Index 45-60)
 type AiProfile struct {
 	Signature         string `json:"signature"`
 	DefaultCategory   string `json:"default_category"`
@@ -128,7 +187,6 @@ func gs(row []interface{}, idx int) string {
 	return ""
 }
 
-// Hàm tạo AuthProfile (0-22)
 func MakeAuthProfile(row []interface{}) AuthProfile {
 	return AuthProfile{
 		Status: gs(row, 0), Note: gs(row, 1), DeviceId: gs(row, 2), UserId: gs(row, 3), UserSec: gs(row, 4),
@@ -139,7 +197,6 @@ func MakeAuthProfile(row []interface{}) AuthProfile {
 	}
 }
 
-// Hàm tạo ActivityProfile (23-44)
 func MakeActivityProfile(row []interface{}) ActivityProfile {
 	return ActivityProfile{
 		StatusPost: gs(row, 23), DailyPostLimit: gs(row, 24), TodayPostCount: gs(row, 25), DailyFollowLimit: gs(row, 26),
@@ -151,7 +208,6 @@ func MakeActivityProfile(row []interface{}) ActivityProfile {
 	}
 }
 
-// Hàm tạo AiProfile (45-60)
 func MakeAiProfile(row []interface{}) AiProfile {
 	return AiProfile{
 		Signature: gs(row, 45), DefaultCategory: gs(row, 46), DefaultProduct: gs(row, 47), PreferredKeywords: gs(row, 48),
