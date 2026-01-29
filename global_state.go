@@ -4,28 +4,22 @@ import (
 	"sync"
 )
 
-// Global State container
 var STATE = struct {
-	// Token Cache (Lớp 1 Auth)
 	TokenMutex sync.RWMutex
 	TokenCache map[string]*CachedToken
 
-	// Rate Limit (Lớp 2 Auth)
 	RateMutex sync.Mutex
 	RateLimit map[string]*RateLimitData
 
-	// Global Counter (Lớp 0 Auth)
 	GlobalCounter struct {
 		Mutex     sync.Mutex
 		Count     int
 		LastReset int64
 	}
 
-	// Sheet Data Cache (Core Data)
 	SheetMutex sync.RWMutex
 	SheetCache map[string]*SheetCacheData
 
-	// Write Queue (Hàng đợi ghi đĩa)
 	QueueMutex sync.Mutex
 	WriteQueue map[string]*WriteQueueData
 }{
@@ -35,7 +29,14 @@ var STATE = struct {
 	WriteQueue: make(map[string]*WriteQueueData),
 }
 
-// Cấu trúc Cache Token
+// 🔥 BỔ SUNG AUTH RESULT (QUAN TRỌNG)
+type AuthResult struct {
+	IsValid       bool
+	Messenger     string
+	SpreadsheetID string
+	Data          map[string]interface{}
+}
+
 type CachedToken struct {
 	IsInvalid  bool
 	Msg        string
@@ -55,33 +56,20 @@ type RateLimitData struct {
 	LastReset int64
 }
 
-// 🔥 CẤU TRÚC CACHE PHÂN VÙNG (Partitioned Cache)
 type SheetCacheData struct {
-	RawValues   [][]interface{} // Dữ liệu gốc (Source of Truth)
-	CleanValues [][]string      // Dữ liệu đã chuẩn hóa
-
-	// 1. Map truy cập nhanh theo DeviceID (O(1))
-	// Key: DeviceID -> Value: RowIndex
-	// Giúp tìm nick cũ ngay lập tức mà không cần loop.
-	AssignedMap map[string]int
-
-	// 2. Danh sách Nick trống (Chưa có chủ)
-	// Chỉ chứa RowIndex của các dòng có DeviceId == ""
+	RawValues      [][]interface{}
+	CleanValues    [][]string
+	AssignedMap    map[string]int
 	UnassignedList []int
-
-	// 3. Map phân loại theo Status (để lọc nhanh nhóm "đang chờ", "đăng ký"...)
-	// Key: Status -> Value: Danh sách RowIndex
-	StatusMap map[string][]int
-
-	LastAccessed int64
-	Timestamp    int64
-	TTL          int64
+	StatusMap      map[string][]int
+	LastAccessed   int64
+	Timestamp      int64
+	TTL            int64
 }
 
-// Cấu trúc hàng đợi ghi
 type WriteQueueData struct {
-	Timer      bool // Đánh dấu đang có timer chạy flush hay không (giả lập)
+	Timer      bool
 	IsFlushing bool
-	Updates    map[string]map[int][]interface{} // SheetName -> RowIndex -> Data
-	Appends    map[string][][]interface{}       // SheetName -> List Rows
+	Updates    map[string]map[int][]interface{}
+	Appends    map[string][][]interface{}
 }
