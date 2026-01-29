@@ -175,10 +175,8 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 		}
 	}
 
-	// 🔥 LOGIC TINH CHỈNH MESSAGE (MỚI THÊM)
-	// Nếu không tìm thấy nick nào chạy được ở trên
+	// 🔥 LOGIC TINH CHỈNH MESSAGE CUỐI CÙNG
 	if action == "login" || action == "auto" {
-		// Kiểm tra xem Device này có nick nào đang "Hoàn thành" không
 		completedIndices := cacheData.StatusMap[STATUS_READ.COMPLETED]
 		hasCompletedNick := false
 		
@@ -288,6 +286,7 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 		}
 	}
 	
+	// 🔥 TÍNH NOTE MỚI (Count++)
 	tNote := tao_ghi_chu_chuan(oldNote, tSt, mode)
 
 	STATE.SheetMutex.Lock()
@@ -403,9 +402,12 @@ func kiem_tra_chat_luong_clean(cleanRow []string, action string) QualityResult {
 	return QualityResult{false, "", "unknown"}
 }
 
+// 🔥 HÀM TẠO NOTE ĐÃ FIX LOGIC COUNT
 func tao_ghi_chu_chuan(oldNote, newStatus, mode string) string {
 	nowFull := time.Now().Add(7 * time.Hour).Format("02/01/2006 15:04:05")
 	if mode == "new" { return fmt.Sprintf("%s\n%s", newStatus, nowFull) }
+	
+	// 1. Parse Count cũ
 	count := 0
 	oldNote = strings.TrimSpace(oldNote)
 	lines := strings.Split(oldNote, "\n")
@@ -414,15 +416,23 @@ func tao_ghi_chu_chuan(oldNote, newStatus, mode string) string {
 		if end != -1 { fmt.Sscanf(oldNote[idx+len("(Lần"):idx+end], "%d", &count) }
 	}
 	if count == 0 { count = 1 }
-	if mode == "updated" || mode == "reset" {
-		st := newStatus
-		if st == "" && len(lines) > 0 { st = lines[0] }
-		if st == "" { st = "Đang chạy" }
-		return fmt.Sprintf("%s\n%s (Lần %d)", st, nowFull, count)
-	}
+
+	// 2. Tính toán Count mới TRƯỚC KHI return
 	today := nowFull[:10]
 	oldDate := ""
 	for _, l := range lines { if len(l) >= 10 && strings.Contains(l, "/") { oldDate = l[:10]; break } }
-	if oldDate != today { count = 1 } else { if mode == "reset" { count++ } else if count == 0 { count = 1 } }
-	return fmt.Sprintf("%s\n%s (Lần %d)", newStatus, nowFull, count)
+	
+	if oldDate != today { 
+		count = 1 
+	} else { 
+		if mode == "reset" { count++ } 
+		else if count == 0 { count = 1 }
+	}
+
+	// 3. Return kết quả
+	st := newStatus
+	if st == "" && len(lines) > 0 { st = lines[0] }
+	if st == "" { st = "Đang chạy" }
+	
+	return fmt.Sprintf("%s\n%s (Lần %d)", st, nowFull, count)
 }
