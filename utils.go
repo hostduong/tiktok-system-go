@@ -43,76 +43,120 @@ func ConvertSerialDate(v interface{}) int64 {
 	return 0
 }
 
-// Helper lấy tên cột từ Index
-func getKeyName(idx int) string {
-	switch idx {
-	case 0: return "status"; case 1: return "note"; case 2: return "device_id"; case 3: return "user_id"; case 4: return "user_sec"; case 5: return "user_name"; case 6: return "email";
-	case 7: return "nick_name"; case 8: return "password"; case 9: return "password_email"; case 10: return "recovery_email"; case 11: return "two_fa";
-	case 12: return "phone"; case 13: return "birthday"; case 14: return "client_id"; case 15: return "refresh_token"; case 16: return "access_token";
-	case 17: return "cookie"; case 18: return "user_agent"; case 19: return "proxy"; case 20: return "proxy_expired"; case 21: return "create_country"; case 22: return "create_time";
-	case 23: return "status_post"; case 24: return "daily_post_limit"; case 25: return "today_post_count"; case 26: return "daily_follow_limit"; case 27: return "today_follow_count"; case 28: return "last_active_date";
-	case 29: return "follower_count"; case 30: return "following_count"; case 31: return "likes_count"; case 32: return "video_count"; case 33: return "status_live";
-	case 34: return "live_phone_access"; case 35: return "live_studio_access"; case 36: return "live_key"; case 37: return "last_live_duration";
-	case 38: return "shop_role"; case 39: return "shop_id"; case 40: return "product_count"; case 41: return "shop_health"; case 42: return "total_orders"; case 43: return "total_revenue"; case 44: return "commission_rate";
-	case 45: return "signature"; case 46: return "default_category"; case 47: return "default_product"; case 48: return "preferred_keywords"; case 49: return "preferred_hashtags";
-	case 50: return "writing_style"; case 51: return "main_goal"; case 52: return "default_cta"; case 53: return "content_length"; case 54: return "content_type";
-	case 55: return "target_audience"; case 56: return "visual_style"; case 57: return "ai_persona"; case 58: return "banned_keywords"; case 59: return "content_language"; case 60: return "country";
+// =================================================================================================
+// 📦 STRUCT PROFILE FULL 61 TRƯỜNG (ĐÚNG THỨ TỰ)
+// =================================================================================================
+
+// AuthProfile: Cột 0 -> 22
+type AuthProfile struct {
+	Status        string `json:"status"`
+	Note          string `json:"note"`
+	DeviceId      string `json:"device_id"`
+	UserId        string `json:"user_id"`
+	UserSec       string `json:"user_sec"`
+	UserName      string `json:"user_name"`
+	Email         string `json:"email"`
+	NickName      string `json:"nick_name"`
+	Password      string `json:"password"`
+	PasswordEmail string `json:"password_email"`
+	RecoveryEmail string `json:"recovery_email"`
+	TwoFa         string `json:"two_fa"`
+	Phone         string `json:"phone"`
+	Birthday      string `json:"birthday"`
+	ClientId      string `json:"client_id"`
+	RefreshToken  string `json:"refresh_token"`
+	AccessToken   string `json:"access_token"`
+	Cookie        string `json:"cookie"`
+	UserAgent     string `json:"user_agent"`
+	Proxy         string `json:"proxy"`
+	ProxyExpired  string `json:"proxy_expired"`
+	CreateCountry string `json:"create_country"`
+	CreateTime    string `json:"create_time"`
+}
+
+// ActivityProfile: Cột 23 -> 44
+type ActivityProfile struct {
+	StatusPost       string `json:"status_post"`
+	DailyPostLimit   string `json:"daily_post_limit"`
+	TodayPostCount   string `json:"today_post_count"`
+	DailyFollowLimit string `json:"daily_follow_limit"`
+	TodayFollowCount string `json:"today_follow_count"`
+	LastActiveDate   string `json:"last_active_date"`
+	FollowerCount    string `json:"follower_count"`
+	FollowingCount   string `json:"following_count"`
+	LikesCount       string `json:"likes_count"`
+	VideoCount       string `json:"video_count"`
+	StatusLive       string `json:"status_live"`
+	LivePhoneAccess  string `json:"live_phone_access"`
+	LiveStudioAccess string `json:"live_studio_access"`
+	LiveKey          string `json:"live_key"`
+	LastLiveDuration string `json:"last_live_duration"`
+	ShopRole         string `json:"shop_role"`
+	ShopId           string `json:"shop_id"`
+	ProductCount     string `json:"product_count"`
+	ShopHealth       string `json:"shop_health"`
+	TotalOrders      string `json:"total_orders"`
+	TotalRevenue     string `json:"total_revenue"`
+	CommissionRate   string `json:"commission_rate"`
+}
+
+// AiProfile: Cột 45 -> 60
+type AiProfile struct {
+	Signature         string `json:"signature"`
+	DefaultCategory   string `json:"default_category"`
+	DefaultProduct    string `json:"default_product"`
+	PreferredKeywords string `json:"preferred_keywords"`
+	PreferredHashtags string `json:"preferred_hashtags"`
+	WritingStyle      string `json:"writing_style"`
+	MainGoal          string `json:"main_goal"`
+	DefaultCta        string `json:"default_cta"`
+	ContentLength     string `json:"content_length"`
+	ContentType       string `json:"content_type"`
+	TargetAudience    string `json:"target_audience"`
+	VisualStyle       string `json:"visual_style"`
+	AiPersona         string `json:"ai_persona"`
+	BannedKeywords    string `json:"banned_keywords"`
+	ContentLanguage   string `json:"content_language"`
+	Country           string `json:"country"`
+}
+
+// Helper lấy string an toàn từ row
+func gs(row []interface{}, idx int) string {
+	if idx >= 0 && idx < len(row) {
+		return fmt.Sprintf("%v", row[idx])
 	}
 	return ""
 }
 
-func getString(row []interface{}, idx int) string {
-	if idx >= 0 && idx < len(row) { return fmt.Sprintf("%v", row[idx]) }
-	return ""
-}
-
-// Mapping nhóm AUTH (0 -> 22)
-func AnhXaAuth(row []interface{}) map[string]interface{} {
-	res := make(map[string]interface{})
-	for i := 0; i <= 22; i++ {
-		key := getKeyName(i)
-		if key != "" { res[key] = getString(row, i) }
+// Hàm tạo AuthProfile (0-22)
+func MakeAuthProfile(row []interface{}) AuthProfile {
+	return AuthProfile{
+		Status: gs(row, 0), Note: gs(row, 1), DeviceId: gs(row, 2), UserId: gs(row, 3), UserSec: gs(row, 4),
+		UserName: gs(row, 5), Email: gs(row, 6), NickName: gs(row, 7), Password: gs(row, 8), PasswordEmail: gs(row, 9),
+		RecoveryEmail: gs(row, 10), TwoFa: gs(row, 11), Phone: gs(row, 12), Birthday: gs(row, 13), ClientId: gs(row, 14),
+		RefreshToken: gs(row, 15), AccessToken: gs(row, 16), Cookie: gs(row, 17), UserAgent: gs(row, 18), Proxy: gs(row, 19),
+		ProxyExpired: gs(row, 20), CreateCountry: gs(row, 21), CreateTime: gs(row, 22),
 	}
-	return res
 }
 
-// Mapping nhóm ACTIVITY (23 -> 44)
-func AnhXaActivity(row []interface{}) map[string]interface{} {
-	res := make(map[string]interface{})
-	for i := 23; i <= 44; i++ {
-		key := getKeyName(i)
-		if key != "" { res[key] = getString(row, i) }
+// Hàm tạo ActivityProfile (23-44)
+func MakeActivityProfile(row []interface{}) ActivityProfile {
+	return ActivityProfile{
+		StatusPost: gs(row, 23), DailyPostLimit: gs(row, 24), TodayPostCount: gs(row, 25), DailyFollowLimit: gs(row, 26),
+		TodayFollowCount: gs(row, 27), LastActiveDate: gs(row, 28), FollowerCount: gs(row, 29), FollowingCount: gs(row, 30),
+		LikesCount: gs(row, 31), VideoCount: gs(row, 32), StatusLive: gs(row, 33), LivePhoneAccess: gs(row, 34),
+		LiveStudioAccess: gs(row, 35), LiveKey: gs(row, 36), LastLiveDuration: gs(row, 37), ShopRole: gs(row, 38),
+		ShopId: gs(row, 39), ProductCount: gs(row, 40), ShopHealth: gs(row, 41), TotalOrders: gs(row, 42),
+		TotalRevenue: gs(row, 43), CommissionRate: gs(row, 44),
 	}
-	return res
 }
 
-// Mapping nhóm AI (45 -> 60)
-func AnhXaAi(row []interface{}) map[string]interface{} {
-	res := make(map[string]interface{})
-	for i := 45; i <= 60; i++ {
-		key := getKeyName(i)
-		if key != "" { res[key] = getString(row, i) }
+// Hàm tạo AiProfile (45-60)
+func MakeAiProfile(row []interface{}) AiProfile {
+	return AiProfile{
+		Signature: gs(row, 45), DefaultCategory: gs(row, 46), DefaultProduct: gs(row, 47), PreferredKeywords: gs(row, 48),
+		PreferredHashtags: gs(row, 49), WritingStyle: gs(row, 50), MainGoal: gs(row, 51), DefaultCta: gs(row, 52),
+		ContentLength: gs(row, 53), ContentType: gs(row, 54), TargetAudience: gs(row, 55), VisualStyle: gs(row, 56),
+		AiPersona: gs(row, 57), BannedKeywords: gs(row, 58), ContentLanguage: gs(row, 59), Country: gs(row, 60),
 	}
-	return res
-}
-
-// Type QualityResult để dùng chung
-type QualityResult struct { Valid bool; SystemEmail string; Missing string }
-
-// Hàm kiểm tra chất lượng nick (dùng chung)
-func kiem_tra_chat_luong_clean(cleanRow []string, action string) QualityResult {
-	if len(cleanRow) <= INDEX_DATA_TIKTOK.EMAIL { return QualityResult{false, "", "data_length"} }
-	rawEmail := cleanRow[INDEX_DATA_TIKTOK.EMAIL]
-	sysEmail := ""
-	if strings.Contains(rawEmail, "@") { parts := strings.Split(rawEmail, "@"); if len(parts) > 1 { sysEmail = parts[1] } }
-	if action == "view_only" { return QualityResult{true, sysEmail, ""} }
-	
-	hasEmail := (rawEmail != "")
-	hasUser := (cleanRow[INDEX_DATA_TIKTOK.USER_NAME] != "")
-	hasPass := (cleanRow[INDEX_DATA_TIKTOK.PASSWORD] != "")
-
-	if strings.Contains(action, "register") { if hasEmail { return QualityResult{true, sysEmail, ""} }; return QualityResult{false, "", "email"} }
-	if strings.Contains(action, "login") { if (hasEmail || hasUser) && hasPass { return QualityResult{true, sysEmail, ""} }; return QualityResult{false, "", "user/pass"} }
-	if action == "auto" { if hasEmail || ((hasUser || hasEmail) && hasPass) { return QualityResult{true, sysEmail, ""} }; return QualityResult{false, "", "data"} }
-	return QualityResult{false, "", "unknown"}
 }
