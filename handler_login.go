@@ -23,13 +23,11 @@ type LoginResponse struct {
 
 func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 	var body map[string]interface{}
+	// Đã check lỗi JSON ở Middleware, ở đây chỉ decode lại
 	json.NewDecoder(r.Body).Decode(&body)
 
 	tokenData, ok := r.Context().Value("tokenData").(*TokenData)
-	if !ok {
-		http.Error(w, `{"status":"false"}`, 401)
-		return
-	}
+	if !ok { return }
 
 	sid := tokenData.SpreadsheetID
 	deviceId := CleanString(body["deviceId"])
@@ -56,15 +54,11 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action string) (*LoginResponse, error) {
-	// Nạp dữ liệu (Đã phân vùng)
+	// 1. Load Data (Partitioned)
 	cacheData, err := LayDuLieu(sid, SHEET_NAMES.DATA_TIKTOK, false)
 	if err != nil { return nil, fmt.Errorf("Lỗi tải dữ liệu") }
 
-	var targetIndex = -1
-	var responseType = "login"
-	var sysEmail = ""
-
-	// 1. Chỉ Parse search_col_
+	// 2. Parse Search Cols (ONLY search_col_)
 	searchCols := make(map[int]string)
 	for k, v := range body {
 		if strings.HasPrefix(k, "search_col_") {
@@ -75,32 +69,30 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	}
 	hasSearch := len(searchCols) > 0
 
-	// 2. Ưu tiên 1: Check AssignedMap (Fast Path - O(1))
-	if idx, ok := cacheData.AssignedMap[deviceId]; ok {
-		if idx < len(cacheData.RawValues) {
-			cleanRow := cacheData.CleanValues[idx]
-			// Double check
-			if cleanRow[INDEX_DATA_TIKTOK.DEVICE_ID] == deviceId {
-				// Nếu có Search, phải khớp Search mới được lấy
-				isMatch := true
-				if hasSearch {
-					for cIdx, val := range searchCols {
-						if cIdx >= len(cleanRow) || cleanRow[cIdx] != val { isMatch = false; break }
-					}
+	// 3. ƯU TIÊN 1: NICK CŨ (AssignedMap - O(1))
+	if idx, ok := cacheData.AssignedMap[deviceId]; ok && idx < len(cacheData.RawValues) {
+		cleanRow := cacheData.CleanValues[idx]
+		if cleanRow[INDEX_DATA_TIKTOK.DEVICE_ID] == deviceId {
+			// Check khớp Search (nếu có)
+			match := true
+			if hasSearch {
+				for cIdx, val := range searchCols {
+					if cIdx >= len(cleanRow) || cleanRow[cIdx] != val { match = false; break }
 				}
-
-				if isMatch {
-					val := kiem_tra_chat_luong_clean(cleanRow, action)
-					if val.Valid {
-						return commit_and_response(sid, deviceId, cacheData, idx, determineType(cleanRow), val.SystemEmail, action)
-					}
+			}
+			
+			if match {
+				val := kiem_tra_chat_luong_clean(cleanRow, action)
+				if val.Valid {
+					return commit_and_response(sid, deviceId, cacheData, idx, determineType(cleanRow), val.SystemEmail, action)
 				}
 			}
 		}
 	}
 
-	// 3. Ưu tiên 2: Tìm kiếm trong mảng (Search Mode - O(N))
+	// 4. ƯU TIÊN 2: SEARCH MỚI (O(N) - Chỉ chạy khi có search_col)
 	if hasSearch {
+		// Quét mảng tìm nick khớp search_col
 		for i, row := range cacheData.CleanValues {
 			match := true
 			for cIdx, val := range searchCols {
@@ -116,7 +108,6 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 						return commit_and_response(sid, deviceId, cacheData, i, determineType(row), val.SystemEmail, action)
 					}
 				} else {
-					// Self-Healing
 					doSelfHealing(sid, i, val.Missing, cacheData)
 				}
 			}
@@ -124,8 +115,8 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 		return nil, fmt.Errorf("Không tìm thấy tài khoản theo yêu cầu")
 	}
 
-	// 4. Ưu tiên 3: Auto Pick (StatusMap - O(1))
-	if targetIndex == -1 && action != "view_only" {
+	// 5. ƯU TIÊN 3: AUTO PICK (StatusMap - O(1))
+	if action != "view_only" {
 		isReset := false
 		if v, ok := body["is_reset"].(bool); ok && v { isReset = true }
 		
@@ -134,27 +125,25 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 		for _, statusKey := range priorities {
 			indices := cacheData.StatusMap[statusKey]
 			for _, idx := range indices {
-				// Check nhanh DeviceID trong RAM
 				if idx < len(cacheData.CleanValues) {
-					curDev := cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID]
-					
-					if curDev == "" {
+					// Check DeviceID empty in RAM
+					if cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] == "" {
 						val := kiem_tra_chat_luong_clean(cacheData.CleanValues[idx], action)
 						if !val.Valid {
 							doSelfHealing(sid, idx, val.Missing, cacheData)
 							continue
 						}
 
-						// Lock & Claim
+						// Global Lock & Claim
 						STATE.SheetMutex.Lock()
 						if cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] == "" {
-							// Update RAM
+							// Update RAM Partition
 							cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
 							cacheData.RawValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
 							cacheData.AssignedMap[deviceId] = idx
+							// Note: Vẫn giữ trong UnassignedList cho đơn giản (chỉ check string empty)
 							
 							STATE.SheetMutex.Unlock()
-							
 							return commit_and_response(sid, deviceId, cacheData, idx, determineType(cacheData.CleanValues[idx]), val.SystemEmail, action)
 						}
 						STATE.SheetMutex.Unlock()
@@ -167,12 +156,9 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	return nil, fmt.Errorf("Không còn tài khoản phù hợp")
 }
 
-// Helpers
 func determineType(row []string) string {
 	st := row[INDEX_DATA_TIKTOK.STATUS]
-	if st == STATUS_READ.REGISTER || st == STATUS_READ.REGISTERING || st == STATUS_READ.WAIT_REG {
-		return "register"
-	}
+	if st == STATUS_READ.REGISTER || st == STATUS_READ.REGISTERING || st == STATUS_READ.WAIT_REG { return "register" }
 	return "login"
 }
 
@@ -180,34 +166,29 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 	row := cache.RawValues[idx]
 	tSt := STATUS_WRITE.RUNNING
 	if typ == "register" { tSt = STATUS_WRITE.REGISTERING }
-
+	
 	oldNote := SafeString(row[INDEX_DATA_TIKTOK.NOTE])
 	mode := "normal"
 	if cache.CleanValues[idx][INDEX_DATA_TIKTOK.STATUS] == STATUS_READ.COMPLETED { mode = "reset" }
-	
 	tNote := tao_ghi_chu_chuan(oldNote, tSt, mode)
 
-	// Update RAM & Map
+	// Update RAM & Status Map
 	STATE.SheetMutex.Lock()
+	oldCleanSt := cache.CleanValues[idx][INDEX_DATA_TIKTOK.STATUS]
+	
 	cache.RawValues[idx][INDEX_DATA_TIKTOK.STATUS] = tSt
 	cache.RawValues[idx][INDEX_DATA_TIKTOK.NOTE] = tNote
 	cache.RawValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
 	
-	if INDEX_DATA_TIKTOK.STATUS < CACHE.CLEAN_COL_LIMIT {
-		cache.CleanValues[idx][INDEX_DATA_TIKTOK.STATUS] = CleanString(tSt)
-	}
-	if INDEX_DATA_TIKTOK.NOTE < CACHE.CLEAN_COL_LIMIT {
-		cache.CleanValues[idx][INDEX_DATA_TIKTOK.NOTE] = CleanString(tNote)
-	}
+	if INDEX_DATA_TIKTOK.STATUS < CACHE.CLEAN_COL_LIMIT { cache.CleanValues[idx][INDEX_DATA_TIKTOK.STATUS] = CleanString(tSt) }
+	if INDEX_DATA_TIKTOK.NOTE < CACHE.CLEAN_COL_LIMIT { cache.CleanValues[idx][INDEX_DATA_TIKTOK.NOTE] = CleanString(tNote) }
 	
-	// Update StatusMap (Move Index)
-	// (Logic: Xóa index khỏi bucket cũ, thêm vào bucket mới - đã implement ở các phiên bản trước, giữ nguyên logic đó hoặc implement đơn giản ở đây)
-	// Để gọn code, tôi giả định StatusMap được refresh hoặc handle lazy. 
-	// Nếu cần chính xác tuyệt đối:
-	// oldSt := CleanString(row[INDEX_DATA_TIKTOK.STATUS]) (trước khi gán tSt)
-	// removeFromMap(cache.StatusMap, oldSt, idx)
-	// cache.StatusMap[CleanString(tSt)] = append(cache.StatusMap[CleanString(tSt)], idx)
-
+	// Move Status Index
+	if oldCleanSt != CleanString(tSt) {
+		removeFromStatusMap(cache.StatusMap, oldCleanSt, idx)
+		newSt := CleanString(tSt)
+		cache.StatusMap[newSt] = append(cache.StatusMap[newSt], idx)
+	}
 	STATE.SheetMutex.Unlock()
 
 	// Queue Update
@@ -216,7 +197,6 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 	newRow[INDEX_DATA_TIKTOK.STATUS] = tSt
 	newRow[INDEX_DATA_TIKTOK.NOTE] = tNote
 	newRow[INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
-	
 	QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, idx, newRow)
 
 	msg := "Lấy nick đăng nhập thành công"
@@ -229,17 +209,31 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 	}, nil
 }
 
+func removeFromStatusMap(m map[string][]int, status string, targetIdx int) {
+	if list, ok := m[status]; ok {
+		for i, v := range list {
+			if v == targetIdx {
+				m[status] = append(list[:i], list[i+1:]...)
+				return
+			}
+		}
+	}
+}
+
 func doSelfHealing(sid string, idx int, missing string, cache *SheetCacheData) {
-	// Ghi chú lỗi vào Queue, không cần update RAM ngay vì nick này đằng nào cũng bị bỏ qua
+	// Update RAM & Queue Status -> ATTENTION
+	STATE.SheetMutex.Lock()
+	defer STATE.SheetMutex.Unlock()
+	
 	msg := "Nick thiếu " + missing + "\n" + time.Now().Format("02/01/2006 15:04:05")
-	row := cache.RawValues[idx]
-	
-	newRow := make([]interface{}, len(row))
-	copy(newRow, row)
-	newRow[INDEX_DATA_TIKTOK.STATUS] = STATUS_WRITE.ATTENTION
-	newRow[INDEX_DATA_TIKTOK.NOTE] = msg
-	
-	QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, idx, newRow)
+	cache.RawValues[idx][INDEX_DATA_TIKTOK.STATUS] = STATUS_WRITE.ATTENTION
+	cache.RawValues[idx][INDEX_DATA_TIKTOK.NOTE] = msg
+	// (Có thể update StatusMap ở đây nếu muốn kỹ)
+
+	updateData := make([]interface{}, len(cache.RawValues[idx]))
+	copy(updateData, cache.RawValues[idx])
+	// Cần copy updateData vì Queue chạy async
+	go QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, idx, updateData)
 }
 
 func getPriorityList(action string, isReset bool) []string {
@@ -263,18 +257,9 @@ func kiem_tra_chat_luong_clean(cleanRow []string, action string) QualityResult {
 	hasUser := (cleanRow[INDEX_DATA_TIKTOK.USER_NAME] != "")
 	hasPass := (cleanRow[INDEX_DATA_TIKTOK.PASSWORD] != "")
 
-	if strings.Contains(action, "register") {
-		if hasEmail { return QualityResult{true, sysEmail, ""} }
-		return QualityResult{false, "", "email"}
-	}
-	if strings.Contains(action, "login") {
-		if (hasEmail || hasUser) && hasPass { return QualityResult{true, sysEmail, ""} }
-		return QualityResult{false, "", "user/pass"}
-	}
-	if action == "auto" {
-		if hasEmail || ((hasUser || hasEmail) && hasPass) { return QualityResult{true, sysEmail, ""} }
-		return QualityResult{false, "", "data"}
-	}
+	if strings.Contains(action, "register") { if hasEmail { return QualityResult{true, sysEmail, ""} }; return QualityResult{false, "", "email"} }
+	if strings.Contains(action, "login") { if (hasEmail || hasUser) && hasPass { return QualityResult{true, sysEmail, ""} }; return QualityResult{false, "", "user/pass"} }
+	if action == "auto" { if hasEmail || ((hasUser || hasEmail) && hasPass) { return QualityResult{true, sysEmail, ""} }; return QualityResult{false, "", "data"} }
 	return QualityResult{false, "", "unknown"}
 }
 
