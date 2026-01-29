@@ -9,15 +9,15 @@ import (
 	"time"
 )
 
-// [CẬP NHẬT] Sử dụng map[string]interface{} để tương thích với utils.go mới
+// Sử dụng Struct tường minh cho Response
 type UpdateResponse struct {
-	Status          string                 `json:"status"`
-	Type            string                 `json:"type"`
-	Messenger       string                 `json:"messenger"`
-	RowIndex        int                    `json:"row_index,omitempty"`
-	AuthProfile     map[string]interface{} `json:"auth_profile"`
-	ActivityProfile map[string]interface{} `json:"activity_profile"`
-	AiProfile       map[string]interface{} `json:"ai_profile"`
+	Status          string          `json:"status"`
+	Type            string          `json:"type"`
+	Messenger       string          `json:"messenger"`
+	RowIndex        int             `json:"row_index,omitempty"`
+	AuthProfile     AuthProfile     `json:"auth_profile"`
+	ActivityProfile ActivityProfile `json:"activity_profile"`
+	AiProfile       AiProfile       `json:"ai_profile"`
 }
 
 func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +53,6 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 	}
 	isDataTiktok := (sheetName == SHEET_NAMES.DATA_TIKTOK)
 
-	// Smart Load
 	cacheData, err := LayDuLieu(sid, sheetName, false)
 	if err != nil {
 		return nil, fmt.Errorf("Lỗi tải dữ liệu")
@@ -63,7 +62,6 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 	targetIndex := -1
 	isAppend := false
 	
-	// 1. Parse row_index (Sử dụng hàm toFloat từ utils.go)
 	rowIndexInput := -1
 	if v, ok := body["row_index"]; ok {
 		if val, ok := toFloat(v); ok {
@@ -71,7 +69,6 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 		}
 	}
 
-	// 2. Logic tìm dòng cần sửa
 	searchCols := make(map[int]string)
 	updateCols := make(map[int]interface{})
 
@@ -94,7 +91,6 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 	hasRowIndex := (rowIndexInput >= RANGES.DATA_START_ROW)
 	hasSearchCols := (len(searchCols) > 0)
 
-	// A. Truy cập trực tiếp (O(1))
 	if hasRowIndex {
 		idx := rowIndexInput - RANGES.DATA_START_ROW
 		if idx >= 0 && idx < len(rows) {
@@ -119,7 +115,6 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 			return nil, fmt.Errorf("Dòng yêu cầu không tồn tại")
 		}
 	} else if hasSearchCols {
-		// B. Search động (O(N))
 		for i, row := range cacheData.CleanValues {
 			match := true
 			for colIdx, val := range searchCols {
@@ -141,11 +136,9 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 			return nil, fmt.Errorf("Không tìm thấy dữ liệu phù hợp")
 		}
 	} else {
-		// C. Thêm mới (Append)
 		isAppend = true
 	}
 
-	// 3. Chuẩn bị dữ liệu ghi
 	var newRow []interface{}
 	oldNote := ""
 	oldStatus := ""
@@ -192,31 +185,25 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 		if isAppend { mode = "new" }
 		newStatus := fmt.Sprintf("%v", newRow[INDEX_DATA_TIKTOK.STATUS])
 		
-		// Sử dụng hàm tạo note từ handler_login (hoặc copy sang utils nếu cần dùng chung)
-		// Ở đây ta gọi hàm local hoặc từ utils. 
-		// Để an toàn, ta dùng logic tạo note trực tiếp ở đây hoặc giả định hàm tao_ghi_chu_chuan đã được move sang utils.go
-		// TUY NHIÊN: Để tránh lỗi undefined, ta dùng hàm tao_ghi_chu_chuan_update nội bộ.
 		newRow[INDEX_DATA_TIKTOK.NOTE] = tao_ghi_chu_chuan_update(oldNote, content, newStatus, mode)
 	}
 
-	// 4. Update RAM & Queue
 	cacheKey := sid + KEY_SEPARATOR + sheetName
 	
 	if isAppend {
 		STATE.SheetMutex.Lock()
-		delete(STATE.SheetCache, cacheKey) // Invalidate cache để load lại
+		delete(STATE.SheetCache, cacheKey)
 		STATE.SheetMutex.Unlock()
 		
 		QueueAppend(sid, sheetName, [][]interface{}{newRow})
 		
-		// [SỬA LỖI] Dùng AnhXa... thay vì Make...
 		return &UpdateResponse{
 			Status:          "true",
 			Type:            "updated",
 			Messenger:       "Thêm mới thành công",
-			AuthProfile:     AnhXaAuth(newRow),
-			ActivityProfile: AnhXaActivity(newRow),
-			AiProfile:       AnhXaAi(newRow),
+			AuthProfile:     MakeAuthProfile(newRow),
+			ActivityProfile: MakeActivityProfile(newRow),
+			AiProfile:       MakeAiProfile(newRow),
 		}, nil
 
 	} else {
@@ -252,20 +239,18 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 
 		QueueUpdate(sid, sheetName, targetIndex, newRow)
 		
-		// [SỬA LỖI] Dùng AnhXa... thay vì Make...
 		return &UpdateResponse{
 			Status:          "true",
 			Type:            "updated",
 			Messenger:       "Cập nhật thành công",
 			RowIndex:        RANGES.DATA_START_ROW + targetIndex,
-			AuthProfile:     AnhXaAuth(newRow),
-			ActivityProfile: AnhXaActivity(newRow),
-			AiProfile:       AnhXaAi(newRow),
+			AuthProfile:     MakeAuthProfile(newRow),
+			ActivityProfile: MakeActivityProfile(newRow),
+			AiProfile:       MakeAiProfile(newRow),
 		}, nil
 	}
 }
 
-// Logic tạo Note (Local version để tránh phụ thuộc chéo)
 func tao_ghi_chu_chuan_update(oldNote, content, newStatus, mode string) string {
 	nowFull := time.Now().Add(7 * time.Hour).Format("02/01/2006 15:04:05")
 	if mode == "new" {
