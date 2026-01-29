@@ -20,13 +20,40 @@ func SafeString(v interface{}) string {
 	return strings.TrimSpace(fmt.Sprintf("%v", v))
 }
 
-// 🔥 Hàm này chuyển vào utils để dùng chung, tránh lỗi redeclared
 func toFloat(v interface{}) (float64, bool) {
 	if f, ok := v.(float64); ok { return f, true }
 	if s, ok := v.(string); ok {
 		if f, err := strconv.ParseFloat(s, 64); err == nil { return f, true }
 	}
 	return 0, false
+}
+
+// 🔥 Helper mới: Chuyển Input (String hoặc Array) thành Slice String chuẩn
+func ToSlice(v interface{}) []string {
+	if v == nil { return []string{} }
+	
+	// Nếu là mảng []interface{} (do JSON decode)
+	if arr, ok := v.([]interface{}); ok {
+		res := make([]string, len(arr))
+		for i, item := range arr {
+			res[i] = CleanString(item)
+		}
+		return res
+	}
+	
+	// Nếu là string đơn lẻ
+	s := CleanString(v)
+	if s != "" { return []string{s} }
+	
+	// Trường hợp đặc biệt: Input là "" nhưng user muốn filter rỗng -> Vẫn trả về mảng chứa ""
+	if s == "" {
+		// Kiểm tra xem v có thực sự là chuỗi rỗng không hay là nil
+		if strVal, ok := v.(string); ok && strVal == "" {
+			return []string{""}
+		}
+	}
+	
+	return []string{}
 }
 
 func ConvertSerialDate(v interface{}) int64 {
@@ -46,7 +73,7 @@ func ConvertSerialDate(v interface{}) int64 {
 	return 0
 }
 
-// --- 2. HÀM KIỂM TRA CHẤT LƯỢNG NICK (Đã thêm vào đây) ---
+// --- 2. HÀM KIỂM TRA CHẤT LƯỢNG NICK ---
 
 type QualityResult struct {
 	Valid       bool
@@ -54,59 +81,26 @@ type QualityResult struct {
 	Missing     string
 }
 
-// 🔥 Hàm này ĐÃ CÓ MẶT ở đây để các file khác gọi
 func KiemTraChatLuongClean(cleanRow []string, action string) QualityResult {
-	// Kiểm tra độ dài dữ liệu
-	if len(cleanRow) <= INDEX_DATA_TIKTOK.EMAIL {
-		return QualityResult{false, "", "data_length"}
-	}
-
+	if len(cleanRow) <= INDEX_DATA_TIKTOK.EMAIL { return QualityResult{false, "", "data_length"} }
 	rawEmail := cleanRow[INDEX_DATA_TIKTOK.EMAIL]
 	sysEmail := ""
-	if strings.Contains(rawEmail, "@") {
-		parts := strings.Split(rawEmail, "@")
-		if len(parts) > 1 {
-			sysEmail = parts[1]
-		}
-	}
-
-	// Nếu chỉ view, luôn valid
-	if action == "view_only" {
-		return QualityResult{true, sysEmail, ""}
-	}
-
+	if strings.Contains(rawEmail, "@") { parts := strings.Split(rawEmail, "@"); if len(parts) > 1 { sysEmail = parts[1] } }
+	if action == "view_only" { return QualityResult{true, sysEmail, ""} }
+	
 	hasEmail := (rawEmail != "")
 	hasUser := (cleanRow[INDEX_DATA_TIKTOK.USER_NAME] != "")
 	hasPass := (cleanRow[INDEX_DATA_TIKTOK.PASSWORD] != "")
 
-	if strings.Contains(action, "register") {
-		if hasEmail {
-			return QualityResult{true, sysEmail, ""}
-		}
-		return QualityResult{false, "", "email"}
-	}
-
-	if strings.Contains(action, "login") {
-		if (hasEmail || hasUser) && hasPass {
-			return QualityResult{true, sysEmail, ""}
-		}
-		return QualityResult{false, "", "user/pass"}
-	}
-
-	if action == "auto" {
-		// Auto: Cần Email OR (User & Pass)
-		if hasEmail || ((hasUser || hasEmail) && hasPass) {
-			return QualityResult{true, sysEmail, ""}
-		}
-		return QualityResult{false, "", "data"}
-	}
-
+	if strings.Contains(action, "register") { if hasEmail { return QualityResult{true, sysEmail, ""} }; return QualityResult{false, "", "email"} }
+	if strings.Contains(action, "login") { if (hasEmail || hasUser) && hasPass { return QualityResult{true, sysEmail, ""} }; return QualityResult{false, "", "user/pass"} }
+	if action == "auto" { if hasEmail || ((hasUser || hasEmail) && hasPass) { return QualityResult{true, sysEmail, ""} }; return QualityResult{false, "", "data"} }
 	return QualityResult{false, "", "unknown"}
 }
 
-// --- 3. STRUCT & MAPPING 61 TRƯỜNG (FULL) ---
+// --- 3. STRUCT & MAPPING 61 TRƯỜNG ---
 
-// AuthProfile: 23 trường đầu (Index 0-22)
+// AuthProfile: 0-22
 type AuthProfile struct {
 	Status        string `json:"status"`
 	Note          string `json:"note"`
@@ -133,7 +127,7 @@ type AuthProfile struct {
 	CreateTime    string `json:"create_time"`
 }
 
-// ActivityProfile: 22 trường tiếp theo (Index 23-44)
+// ActivityProfile: 23-44
 type ActivityProfile struct {
 	StatusPost       string `json:"status_post"`
 	DailyPostLimit   string `json:"daily_post_limit"`
@@ -159,7 +153,7 @@ type ActivityProfile struct {
 	CommissionRate   string `json:"commission_rate"`
 }
 
-// AiProfile: 16 trường cuối (Index 45-60)
+// AiProfile: 45-60
 type AiProfile struct {
 	Signature         string `json:"signature"`
 	DefaultCategory   string `json:"default_category"`
@@ -179,11 +173,8 @@ type AiProfile struct {
 	Country           string `json:"country"`
 }
 
-// Helper lấy string an toàn từ row
 func gs(row []interface{}, idx int) string {
-	if idx >= 0 && idx < len(row) {
-		return fmt.Sprintf("%v", row[idx])
-	}
+	if idx >= 0 && idx < len(row) { return fmt.Sprintf("%v", row[idx]) }
 	return ""
 }
 
@@ -216,3 +207,12 @@ func MakeAiProfile(row []interface{}) AiProfile {
 		AiPersona: gs(row, 57), BannedKeywords: gs(row, 58), ContentLanguage: gs(row, 59), Country: gs(row, 60),
 	}
 }
+
+// Mapping dùng cho update
+func getKeyName(idx int) string {
+	// ... (Giữ nguyên như cũ nếu cần, hoặc dùng Struct trên kia)
+	// Để đơn giản, handler_update sẽ dùng các hàm Make... trả về Struct,
+	// sau đó encode JSON thì key sẽ tự đúng theo tag `json:"..."`.
+	return "" 
+}
+func AnhXaAuth(row []interface{}) map[string]interface{} { return nil } // Placeholder để tương thích code cũ nếu có
