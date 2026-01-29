@@ -22,6 +22,20 @@ func SafeString(v interface{}) string {
 	return strings.TrimSpace(fmt.Sprintf("%v", v))
 }
 
+// 🔥 CHUYỂN HÀM NÀY VÀO ĐÂY ĐỂ DÙNG CHUNG
+func toFloat(v interface{}) (float64, bool) {
+	if f, ok := v.(float64); ok {
+		return f, true
+	}
+	// Fallback nếu là string số
+	if s, ok := v.(string); ok {
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return f, true
+		}
+	}
+	return 0, false
+}
+
 // Hàm này DÙNG math và strconv -> Hết lỗi "not used"
 func ConvertSerialDate(v interface{}) int64 {
 	s := fmt.Sprintf("%v", v)
