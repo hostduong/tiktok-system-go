@@ -1,8 +1,6 @@
 package main
 
-import (
-	"sync"
-)
+import "sync"
 
 var STATE = struct {
 	TokenMutex sync.RWMutex
@@ -29,7 +27,7 @@ var STATE = struct {
 	WriteQueue: make(map[string]*WriteQueueData),
 }
 
-// 🔥 BỔ SUNG AUTH RESULT (QUAN TRỌNG)
+// 🔥 Struct trả về kết quả Auth (Fix lỗi undefined)
 type AuthResult struct {
 	IsValid       bool
 	Messenger     string
@@ -59,9 +57,9 @@ type RateLimitData struct {
 type SheetCacheData struct {
 	RawValues      [][]interface{}
 	CleanValues    [][]string
-	AssignedMap    map[string]int
-	UnassignedList []int
-	StatusMap      map[string][]int
+	AssignedMap    map[string]int   // Map DeviceID -> Index
+	UnassignedList []int            // List Index trống
+	StatusMap      map[string][]int // Map Status -> List Index
 	LastAccessed   int64
 	Timestamp      int64
 	TTL            int64
