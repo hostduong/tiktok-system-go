@@ -2,7 +2,7 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
+	"fmt" // 🔥 Fix import
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,10 +11,7 @@ import (
 
 func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 	var body map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"status":"false","messenger":"Lỗi Body JSON"}`, 400)
-		return
-	}
+	json.NewDecoder(r.Body).Decode(&body)
 
 	tokenData, ok := r.Context().Value("tokenData").(*TokenData)
 	if !ok { return }
@@ -35,7 +32,6 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 	criteriaMax := make(map[int]float64)
 	criteriaTime := make(map[int]float64)
 
-	// Parse Body (Chỉ dùng col_)
 	for k, v := range body {
 		if strings.HasPrefix(k, "match_col_") {
 			idx, _ := strconv.Atoi(k[10:])
@@ -75,7 +71,7 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 		if count >= limit { break }
 		match := true
 
-		// 1. Match
+		// Match
 		for idx, arr := range criteriaMatch {
 			cellVal := ""
 			if idx < len(cleanRows[i]) { cellVal = cleanRows[i][idx] }
@@ -85,7 +81,7 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 		}
 		if !match { continue }
 
-		// 2. Contains
+		// Contains
 		for idx, arr := range criteriaContains {
 			cellVal := ""
 			if idx < len(cleanRows[i]) { cellVal = cleanRows[i][idx] }
@@ -95,20 +91,22 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 		}
 		if !match { continue }
 
-		// 3. Min/Max
+		// Min
 		for idx, minVal := range criteriaMin {
 			if val, ok := getFloatVal(row, idx); !ok || val < minVal { match = false; break }
 		}
 		if !match { continue }
+
+		// Max
 		for idx, maxVal := range criteriaMax {
 			if val, ok := getFloatVal(row, idx); !ok || val > maxVal { match = false; break }
 		}
 		if !match { continue }
 
-		// 4. Time
+		// Time
 		for idx, hours := range criteriaTime {
 			timeVal := int64(0)
-			if idx < len(row) { timeVal = ConvertSerialDate(row[idx]) }
+			if idx < len(row) { timeVal = ConvertSerialDate(row[idx]) } // 🔥 Dùng Utils
 			if timeVal == 0 { match = false; break }
 			if float64(now-timeVal)/3600000.0 > hours { match = false; break }
 		}
@@ -127,6 +125,7 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Helpers local (parseConditionInput, etc)
 func parseConditionInput(v interface{}) []string {
 	if s, ok := v.(string); ok { return []string{CleanString(s)} }
 	if arr, ok := v.([]interface{}); ok {
