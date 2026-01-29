@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -17,23 +18,21 @@ func SafeString(v interface{}) string {
 	return strings.TrimSpace(fmt.Sprintf("%v", v))
 }
 
-// 🔥 Port từ Node.js: chuyen_doi_thoi_gian
+// 🔥 BỔ SUNG: ConvertSerialDate (Port từ Node.js)
 func ConvertSerialDate(v interface{}) int64 {
 	s := fmt.Sprintf("%v", v)
 	
 	// Case 1: String Date (dd/mm/yyyy)
 	if strings.Contains(s, "/") {
-		// Thử format có giờ
 		if t, err := time.ParseInLocation("02/01/2006 15:04:05", s, time.FixedZone("UTC+7", 7*3600)); err == nil {
 			return t.UnixMilli()
 		}
-		// Thử format ngày
 		if t, err := time.ParseInLocation("02/01/2006", s, time.FixedZone("UTC+7", 7*3600)); err == nil {
 			return t.UnixMilli()
 		}
 	}
 
-	// Case 2: Excel Serial Number (45321.123)
+	// Case 2: Excel Serial Number (float)
 	val := 0.0
 	if f, ok := v.(float64); ok {
 		val = f
@@ -43,12 +42,13 @@ func ConvertSerialDate(v interface{}) int64 {
 
 	if val > 0 {
 		// Excel epoch: Dec 30, 1899
+		// Golang time.Date(1899, 12, 30, ...)
 		t := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
-		days := int(val)
-		seconds := int((val - float64(days)) * 86400)
+		days := int(math.Floor(val))
+		fraction := val - float64(days)
+		seconds := int(fraction * 86400)
 		return t.AddDate(0, 0, days).Add(time.Duration(seconds) * time.Second).UnixMilli()
 	}
-	
 	return 0
 }
 
