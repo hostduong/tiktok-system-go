@@ -46,7 +46,7 @@ func HandleMailData(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "true", "messenger": "Đã tiếp nhận mail log"})
 }
 
-// 🔥 SỬA TÊN HÀM Ở ĐÂY CHO KHỚP VỚI MAIN.GO
+// 🔥 FIX TÊN HÀM: HandleGetMail -> HandleReadMail
 func HandleReadMail(w http.ResponseWriter, r *http.Request) {
 	var body map[string]interface{}
 	json.NewDecoder(r.Body).Decode(&body)
@@ -74,6 +74,7 @@ func HandleReadMail(w http.ResponseWriter, r *http.Request) {
 	limitTime := time.Now().Add(time.Duration(-RANGES.EMAIL_WINDOW_MINUTES) * time.Minute).UnixMilli()
 	processCount := 0
 	
+	// Quét ngược (Mới nhất trước)
 	for i := len(rows) - 1; i >= 0; i-- {
 		if processCount >= RANGES.EMAIL_LIMIT_ROWS { break }
 		processCount++
@@ -81,7 +82,7 @@ func HandleReadMail(w http.ResponseWriter, r *http.Request) {
 		row := rows[i]
 		if len(row) <= 7 { continue }
 
-		mailTime := ConvertSerialDate(row[0])
+		mailTime := ConvertSerialDate(row[0]) // Dùng hàm Utils
 		if mailTime < limitTime { break }
 
 		if fmt.Sprintf("%v", row[6]) == "" { continue }
