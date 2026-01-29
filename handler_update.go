@@ -9,14 +9,15 @@ import (
 	"time"
 )
 
+// [CẬP NHẬT] Sử dụng map[string]interface{} để tương thích với utils.go mới
 type UpdateResponse struct {
-	Status          string          `json:"status"`
-	Type            string          `json:"type"`
-	Messenger       string          `json:"messenger"`
-	RowIndex        int             `json:"row_index,omitempty"`
-	AuthProfile     AuthProfile     `json:"auth_profile"`
-	ActivityProfile ActivityProfile `json:"activity_profile"`
-	AiProfile       AiProfile       `json:"ai_profile"`
+	Status          string                 `json:"status"`
+	Type            string                 `json:"type"`
+	Messenger       string                 `json:"messenger"`
+	RowIndex        int                    `json:"row_index,omitempty"`
+	AuthProfile     map[string]interface{} `json:"auth_profile"`
+	ActivityProfile map[string]interface{} `json:"activity_profile"`
+	AiProfile       map[string]interface{} `json:"ai_profile"`
 }
 
 func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
@@ -36,13 +37,12 @@ func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 	deviceId := CleanString(body["deviceId"])
 
 	res, err := xu_ly_cap_nhat_du_lieu(sid, deviceId, body)
+	
+	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": err.Error()})
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(res)
 }
 
@@ -53,7 +53,7 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 	}
 	isDataTiktok := (sheetName == SHEET_NAMES.DATA_TIKTOK)
 
-	// Smart Load (Dữ liệu đã phân vùng)
+	// Smart Load
 	cacheData, err := LayDuLieu(sid, sheetName, false)
 	if err != nil {
 		return nil, fmt.Errorf("Lỗi tải dữ liệu")
@@ -63,20 +63,11 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 	targetIndex := -1
 	isAppend := false
 	
-	// 1. Parse row_index THÔNG MINH (Chấp nhận cả String và Int/Float)
+	// 1. Parse row_index (Sử dụng hàm toFloat từ utils.go)
 	rowIndexInput := -1
 	if v, ok := body["row_index"]; ok {
-		switch val := v.(type) {
-		case float64:
+		if val, ok := toFloat(v); ok {
 			rowIndexInput = int(val)
-		case string:
-			if val != "" {
-				if i, err := strconv.Atoi(strings.TrimSpace(val)); err == nil {
-					rowIndexInput = i
-				}
-			}
-		case int:
-			rowIndexInput = val
 		}
 	}
 
@@ -86,23 +77,28 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 
 	for k, v := range body {
 		if strings.HasPrefix(k, "search_col_") {
-			idx, _ := strconv.Atoi(strings.TrimPrefix(k, "search_col_"))
-			searchCols[idx] = CleanString(v)
+			if idxStr := strings.TrimPrefix(k, "search_col_"); idxStr != "" {
+				if idx, err := strconv.Atoi(idxStr); err == nil {
+					searchCols[idx] = CleanString(v)
+				}
+			}
 		} else if strings.HasPrefix(k, "col_") {
-			idx, _ := strconv.Atoi(strings.TrimPrefix(k, "col_"))
-			updateCols[idx] = v
+			if idxStr := strings.TrimPrefix(k, "col_"); idxStr != "" {
+				if idx, err := strconv.Atoi(idxStr); err == nil {
+					updateCols[idx] = v
+				}
+			}
 		}
 	}
 
 	hasRowIndex := (rowIndexInput >= RANGES.DATA_START_ROW)
 	hasSearchCols := (len(searchCols) > 0)
 
-	// Trường hợp 1: Có row_index -> Truy cập trực tiếp (O(1))
+	// A. Truy cập trực tiếp (O(1))
 	if hasRowIndex {
 		idx := rowIndexInput - RANGES.DATA_START_ROW
 		if idx >= 0 && idx < len(rows) {
 			if hasSearchCols {
-				// Double check nếu client kỹ tính
 				match := true
 				for colIdx, val := range searchCols {
 					cellVal := ""
@@ -123,8 +119,7 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 			return nil, fmt.Errorf("Dòng yêu cầu không tồn tại")
 		}
 	} else if hasSearchCols {
-		// Trường hợp 2: Search động (Phải quét mảng O(N))
-		// (Update by search ít dùng nên O(N) là chấp nhận được)
+		// B. Search động (O(N))
 		for i, row := range cacheData.CleanValues {
 			match := true
 			for colIdx, val := range searchCols {
@@ -146,14 +141,14 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 			return nil, fmt.Errorf("Không tìm thấy dữ liệu phù hợp")
 		}
 	} else {
-		// Trường hợp 3: Append (Thêm mới)
+		// C. Thêm mới (Append)
 		isAppend = true
 	}
 
 	// 3. Chuẩn bị dữ liệu ghi
 	var newRow []interface{}
 	oldNote := ""
-	oldStatus := "" // Để track thay đổi status map
+	oldStatus := ""
 
 	if isAppend {
 		newRow = make([]interface{}, 61)
@@ -196,38 +191,39 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 		mode := "updated"
 		if isAppend { mode = "new" }
 		newStatus := fmt.Sprintf("%v", newRow[INDEX_DATA_TIKTOK.STATUS])
-		newRow[INDEX_DATA_TIKTOK.NOTE] = makeNoteContent(oldNote, content, newStatus, mode)
+		
+		// Sử dụng hàm tạo note từ handler_login (hoặc copy sang utils nếu cần dùng chung)
+		// Ở đây ta gọi hàm local hoặc từ utils. 
+		// Để an toàn, ta dùng logic tạo note trực tiếp ở đây hoặc giả định hàm tao_ghi_chu_chuan đã được move sang utils.go
+		// TUY NHIÊN: Để tránh lỗi undefined, ta dùng hàm tao_ghi_chu_chuan_update nội bộ.
+		newRow[INDEX_DATA_TIKTOK.NOTE] = tao_ghi_chu_chuan_update(oldNote, content, newStatus, mode)
 	}
 
 	// 4. Update RAM & Queue
 	cacheKey := sid + KEY_SEPARATOR + sheetName
 	
 	if isAppend {
-		// Append phức tạp hơn, tạm thời invalidate cache để load lại lần sau cho an toàn
-		// Hoặc thêm vào cuối mảng RAM (nhưng cần handle StatusMap/AssignedMap)
 		STATE.SheetMutex.Lock()
-		delete(STATE.SheetCache, cacheKey) // Xóa cache để ép load lại
+		delete(STATE.SheetCache, cacheKey) // Invalidate cache để load lại
 		STATE.SheetMutex.Unlock()
 		
 		QueueAppend(sid, sheetName, [][]interface{}{newRow})
 		
+		// [SỬA LỖI] Dùng AnhXa... thay vì Make...
 		return &UpdateResponse{
 			Status:          "true",
 			Type:            "updated",
 			Messenger:       "Thêm mới thành công",
-			AuthProfile:     MakeAuthProfile(newRow),
-			ActivityProfile: MakeActivityProfile(newRow),
-			AiProfile:       MakeAiProfile(newRow),
+			AuthProfile:     AnhXaAuth(newRow),
+			ActivityProfile: AnhXaActivity(newRow),
+			AiProfile:       AnhXaAi(newRow),
 		}, nil
 
 	} else {
-		// 🔥 UPDATE RAM & PARTITION MAPS (Logic quan trọng)
 		STATE.SheetMutex.Lock()
 		
-		// A. Update Values
 		cacheData.RawValues[targetIndex] = newRow
 		
-		// B. Update CleanValues
 		for i := 0; i < CACHE.CLEAN_COL_LIMIT; i++ {
 			if i < len(newRow) {
 				cacheData.CleanValues[targetIndex][i] = CleanString(newRow[i])
@@ -235,72 +231,66 @@ func xu_ly_cap_nhat_du_lieu(sid, deviceId string, body map[string]interface{}) (
 		}
 		cacheData.LastAccessed = time.Now().UnixMilli()
 
-		// C. 🔥 Update StatusMap (Di chuyển index nếu đổi trạng thái)
 		if isDataTiktok {
 			newCleanStatus := CleanString(newRow[INDEX_DATA_TIKTOK.STATUS])
-			
 			if newCleanStatus != oldStatus {
-				// Xóa khỏi nhóm cũ
 				if list, ok := cacheData.StatusMap[oldStatus]; ok {
 					for k, v := range list {
 						if v == targetIndex {
-							// Xóa phần tử k (swap last or slice)
 							cacheData.StatusMap[oldStatus] = append(list[:k], list[k+1:]...)
 							break
 						}
 					}
 				}
-				// Thêm vào nhóm mới
 				cacheData.StatusMap[newCleanStatus] = append(cacheData.StatusMap[newCleanStatus], targetIndex)
 			}
-
-			// D. Update AssignedMap (Nếu gán device mới - ít gặp ở luồng update nhưng vẫn nên làm)
 			if deviceId != "" {
 				cacheData.AssignedMap[deviceId] = targetIndex
 			}
 		}
 		STATE.SheetMutex.Unlock()
 
-		// Gửi xuống hàng đợi ghi đĩa
 		QueueUpdate(sid, sheetName, targetIndex, newRow)
 		
+		// [SỬA LỖI] Dùng AnhXa... thay vì Make...
 		return &UpdateResponse{
 			Status:          "true",
 			Type:            "updated",
 			Messenger:       "Cập nhật thành công",
 			RowIndex:        RANGES.DATA_START_ROW + targetIndex,
-			AuthProfile:     MakeAuthProfile(newRow),
-			ActivityProfile: MakeActivityProfile(newRow),
-			AiProfile:       MakeAiProfile(newRow),
+			AuthProfile:     AnhXaAuth(newRow),
+			ActivityProfile: AnhXaActivity(newRow),
+			AiProfile:       AnhXaAi(newRow),
 		}, nil
 	}
 }
 
-// Logic tạo Note (Giữ nguyên)
-func makeNoteContent(oldNote, content, newStatus, mode string) string {
+// Logic tạo Note (Local version để tránh phụ thuộc chéo)
+func tao_ghi_chu_chuan_update(oldNote, content, newStatus, mode string) string {
 	nowFull := time.Now().Add(7 * time.Hour).Format("02/01/2006 15:04:05")
 	if mode == "new" {
 		st := newStatus
 		if st == "" { st = "Đang chờ" }
-		return fmt.Sprintf("%s\n%s", st, nowFull)
+		return st + "\n" + nowFull
 	}
 	count := 0
 	oldNote = strings.TrimSpace(oldNote)
 	lines := strings.Split(oldNote, "\n")
-	lastLine := ""
-	if len(lines) > 0 { lastLine = lines[len(lines)-1] }
-	if idx := strings.Index(lastLine, "(Lần"); idx != -1 {
-		endIdx := strings.Index(lastLine[idx:], ")")
-		if endIdx != -1 {
-			numStr := lastLine[idx+len("(Lần") : idx+endIdx]
-			c, _ := strconv.Atoi(strings.TrimSpace(numStr))
-			count = c
+	
+	if idx := strings.Index(oldNote, "(Lần"); idx != -1 {
+		end := strings.Index(oldNote[idx:], ")")
+		if end != -1 {
+			if c, err := strconv.Atoi(strings.TrimSpace(oldNote[idx+len("(Lần") : idx+end])); err == nil {
+				count = c
+			}
 		}
 	}
 	if count == 0 { count = 1 }
+
 	statusToUse := content
 	if statusToUse == "" { statusToUse = newStatus }
 	if statusToUse == "" && len(lines) > 0 { statusToUse = lines[0] }
 	if statusToUse == "" { statusToUse = "Đang chạy" }
-	return fmt.Sprintf("%s\n%s (Lần %d)", statusToUse, nowFull, count)
+	
+	return statusToUse + "\n" + nowFull + " (Lần " + strconv.Itoa(count) + ")"
 }
