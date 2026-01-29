@@ -18,7 +18,7 @@ func SafeString(v interface{}) string {
 	return strings.TrimSpace(fmt.Sprintf("%v", v))
 }
 
-// Hàm này BẮT BUỘC phải có để dùng math & strconv
+// Hàm này DÙNG math và strconv -> Hết lỗi "not used"
 func ConvertSerialDate(v interface{}) int64 {
 	s := fmt.Sprintf("%v", v)
 	if strings.Contains(s, "/") {
@@ -29,33 +29,17 @@ func ConvertSerialDate(v interface{}) int64 {
 	if f, ok := v.(float64); ok { val = f } else if f, err := strconv.ParseFloat(s, 64); err == nil { val = f }
 	if val > 0 {
 		t := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
-		days := int(math.Floor(val)) // Dùng math ở đây
+		days := int(math.Floor(val))
 		seconds := int((val - float64(days)) * 86400)
 		return t.AddDate(0, 0, days).Add(time.Duration(seconds) * time.Second).UnixMilli()
 	}
 	return 0
 }
 
-// --- STRUCT PROFILES ---
-type AuthProfile struct {
-	UID      string `json:"uid"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
-	User     string `json:"user"`
-	TwoFA    string `json:"2fa"`
-	Cookie   string `json:"cookie"`
-	Token    string `json:"token"`
-}
-type ActivityProfile struct {
-	LastActive string `json:"last_active"`
-	PostCount  string `json:"post_count"`
-	Follower   string `json:"follower"`
-}
-type AiProfile struct {
-	Signature string `json:"signature"`
-	Persona   string `json:"persona"`
-	Target    string `json:"target"`
-}
+// ... (Giữ nguyên Struct Profile)
+type AuthProfile struct { UID, Email, Password, User, TwoFA, Cookie, Token string `json:"uid"` }
+type ActivityProfile struct { LastActive, PostCount, Follower string `json:"last_active"` }
+type AiProfile struct { Signature, Persona, Target string `json:"signature"` }
 
 func MakeAuthProfile(row []interface{}) AuthProfile {
 	return AuthProfile{
