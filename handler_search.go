@@ -134,11 +134,3 @@ func parseConditionInput(v interface{}) []string {
 	}
 	return []string{}
 }
-
-func getFloatVal(row []interface{}, idx int) (float64, bool) {
-	if idx >= len(row) { return 0, false }
-	if f, ok := row[idx].(float64); ok { return f, true }
-	s := fmt.Sprintf("%v", row[idx])
-	if f, err := strconv.ParseFloat(s, 64); err == nil { return f, true }
-	return 0, false
-}
