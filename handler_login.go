@@ -9,25 +9,24 @@ import (
 	"time"
 )
 
-// Cấu trúc phản hồi JSON
+// Dùng Struct tường minh thay vì map
 type LoginResponse struct {
-	Status          string                 `json:"status"`
-	Type            string                 `json:"type"`
-	Messenger       string                 `json:"messenger"`
-	DeviceId        string                 `json:"deviceId"`
-	RowIndex        int                    `json:"row_index"`
-	SystemEmail     string                 `json:"system_email"`
-	AuthProfile     map[string]interface{} `json:"auth_profile"`
-	ActivityProfile map[string]interface{} `json:"activity_profile"`
-	AiProfile       map[string]interface{} `json:"ai_profile"`
+	Status          string          `json:"status"`
+	Type            string          `json:"type"`
+	Messenger       string          `json:"messenger"`
+	DeviceId        string          `json:"deviceId"`
+	RowIndex        int             `json:"row_index"`
+	SystemEmail     string          `json:"system_email"`
+	AuthProfile     AuthProfile     `json:"auth_profile"`
+	ActivityProfile ActivityProfile `json:"activity_profile"`
+	AiProfile       AiProfile       `json:"ai_profile"`
 }
 
-// Cấu trúc bước ưu tiên
 type PriorityStep struct {
 	Status  string
-	IsMy    bool // True: Tìm nick của mình
-	IsEmpty bool // True: Tìm nick trống
-	PrioID  int  // ID ưu tiên
+	IsMy    bool
+	IsEmpty bool
+	PrioID  int
 }
 
 func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
@@ -42,18 +41,15 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 	reqType := CleanString(body["type"])
 	
 	action := "login"
-	if reqType == "view" { 
-		action = "view_only" 
-	} else if reqType == "auto" {
+	if reqType == "view" { action = "view_only" }
+	if reqType == "auto" {
 		action = "auto"
 		if reqAction, _ := body["action"].(string); CleanString(reqAction) == "reset" {
 			body["is_reset"] = true
 		}
-	} else if reqType == "register" { 
-		action = "register" 
-	} else if reqAction, _ := body["action"].(string); CleanString(reqAction) == "reset" { 
-		action = "login_reset" 
 	}
+	if reqType == "register" { action = "register" }
+	if reqAction, _ := body["action"].(string); CleanString(reqAction) == "reset" { action = "login_reset" }
 
 	res, err := xu_ly_lay_du_lieu(sid, deviceId, body, action)
 	
@@ -66,11 +62,9 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action string) (*LoginResponse, error) {
-	// 1. Load Data
 	cacheData, err := LayDuLieu(sid, SHEET_NAMES.DATA_TIKTOK, false)
 	if err != nil { return nil, fmt.Errorf("Lỗi tải dữ liệu") }
 
-	// 2. Parse Input
 	rowIndexInput := -1
 	if v, ok := body["row_index"]; ok {
 		if val, ok := toFloat(v); ok { rowIndexInput = int(val) }
@@ -79,20 +73,17 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	searchCols := make(map[int]string)
 	for k, v := range body {
 		if strings.HasPrefix(k, "search_col_") {
-			if idxStr := strings.TrimPrefix(k, "search_col_"); idxStr != "" {
-				if i, err := strconv.Atoi(idxStr); err == nil {
-					searchCols[i] = CleanString(v)
-				}
+			if i, err := strconv.Atoi(strings.TrimPrefix(k, "search_col_")); err == nil {
+				searchCols[i] = CleanString(v)
 			}
 		}
 	}
 	hasSearch := len(searchCols) > 0
 
-	// 🔒 BẮT ĐẦU KHÓA ĐỌC (Tối ưu đa luồng)
 	STATE.SheetMutex.RLock()
 	rawLen := len(cacheData.RawValues)
 
-	// A. ƯU TIÊN 0: FAST PATH (Row Index)
+	// A. FAST PATH
 	if rowIndexInput >= RANGES.DATA_START_ROW {
 		idx := rowIndexInput - RANGES.DATA_START_ROW
 		if idx >= 0 && idx < rawLen {
@@ -106,23 +97,20 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 			if match {
 				val := kiem_tra_chat_luong_clean(cleanRow, action)
 				if val.Valid {
-					STATE.SheetMutex.RUnlock() // Mở khóa đọc trước khi ghi
+					STATE.SheetMutex.RUnlock()
 					return commit_and_response(sid, deviceId, cacheData, idx, determineType(cleanRow), val.SystemEmail, action, 0)
 				}
 			}
 		}
 	}
 
-	// ❌ ĐÃ XÓA BƯỚC B (CHECK ASSIGNED MAP) THEO ĐÚNG LOGIC V243
-
-	// B. SEARCH MODE (Chỉ chạy khi có search_col)
+	// B. SEARCH MODE
 	if hasSearch {
 		for i, row := range cacheData.CleanValues {
 			match := true
 			for cIdx, val := range searchCols {
 				if cIdx >= len(row) || row[cIdx] != val { match = false; break }
 			}
-			
 			if match {
 				val := kiem_tra_chat_luong_clean(row, action)
 				if val.Valid {
@@ -134,7 +122,7 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 				} else {
 					STATE.SheetMutex.RUnlock()
 					doSelfHealing(sid, i, val.Missing, cacheData)
-					STATE.SheetMutex.RLock() // Khóa lại để tiếp tục
+					STATE.SheetMutex.RLock()
 				}
 			}
 		}
@@ -142,11 +130,13 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 		return nil, fmt.Errorf("Không tìm thấy tài khoản theo yêu cầu")
 	}
 
-	// C. UNIFIED PRIORITY LOOP (Vòng lặp chuẩn Node.js - Quan trọng nhất)
+	// C. UNIFIED PRIORITY LOOP
 	if action != "view_only" {
 		isReset := false
+		// 🔥 FIX LOGIC RESET: Kiểm tra cả action login_reset
 		if v, ok := body["is_reset"].(bool); ok && v { isReset = true }
-		
+		if action == "login_reset" { isReset = true }
+
 		steps := buildPrioritySteps(action, isReset)
 		
 		for _, step := range steps {
@@ -170,15 +160,12 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 							continue
 						}
 
-						// === TÌM THẤY -> CHUYỂN SANG KHÓA GHI ===
 						STATE.SheetMutex.RUnlock()
 						STATE.SheetMutex.Lock()
 						
-						// Double Check (Optimistic Locking)
 						currentRealDev := cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID]
 						
 						if (step.IsMy && currentRealDev == deviceId) || (step.IsEmpty && currentRealDev == "") {
-							// Claim nick
 							cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
 							cacheData.RawValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
 							cacheData.AssignedMap[deviceId] = idx
@@ -188,15 +175,15 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 						}
 						
 						STATE.SheetMutex.Unlock()
-						STATE.SheetMutex.RLock() // Quay lại khóa đọc để tìm tiếp
+						STATE.SheetMutex.RLock()
 					}
 				}
 			}
 		}
 	}
 
-	// Logic báo lỗi chuẩn (Check hoàn thành)
-	if action == "login" || action == "auto" {
+	// Logic báo lỗi cuối cùng
+	if action == "login" || action == "auto" || action == "login_reset" {
 		completedIndices := cacheData.StatusMap[STATUS_READ.COMPLETED]
 		hasCompletedNick := false
 		for _, idx := range completedIndices {
@@ -205,7 +192,6 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 				break
 			}
 		}
-		
 		STATE.SheetMutex.RUnlock()
 		if hasCompletedNick {
 			return nil, fmt.Errorf("Các tài khoản đã hoàn thành")
@@ -217,10 +203,8 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	return nil, fmt.Errorf("Không còn tài khoản phù hợp")
 }
 
-// Xây dựng danh sách ưu tiên (Tối ưu capacity)
 func buildPrioritySteps(action string, isReset bool) []PriorityStep {
 	steps := make([]PriorityStep, 0, 10)
-	
 	add := func(st string, my, empty bool, prio int) {
 		steps = append(steps, PriorityStep{Status: st, IsMy: my, IsEmpty: empty, PrioID: prio})
 	}
@@ -280,7 +264,7 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 		return &LoginResponse{
 			Status: "true", Type: typ, Messenger: "OK", DeviceId: deviceId,
 			RowIndex: RANGES.DATA_START_ROW + idx, SystemEmail: email,
-			AuthProfile: AnhXaAuth(row), ActivityProfile: AnhXaActivity(row), AiProfile: AnhXaAi(row),
+			AuthProfile: MakeAuthProfile(row), ActivityProfile: MakeActivityProfile(row), AiProfile: MakeAiProfile(row),
 		}, nil
 	}
 
@@ -296,7 +280,6 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 		isResetCompleted = true
 	}
 	
-	// 🔥 TÍNH NOTE MỚI (Đã fix logic tăng count)
 	tNote := tao_ghi_chu_chuan(oldNote, tSt, mode)
 
 	STATE.SheetMutex.Lock()
@@ -356,7 +339,7 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 	return &LoginResponse{
 		Status: "true", Type: typ, Messenger: msg, DeviceId: deviceId,
 		RowIndex: RANGES.DATA_START_ROW + idx, SystemEmail: email,
-		AuthProfile: AnhXaAuth(newRow), ActivityProfile: AnhXaActivity(newRow), AiProfile: AnhXaAi(newRow),
+		AuthProfile: MakeAuthProfile(newRow), ActivityProfile: MakeActivityProfile(newRow), AiProfile: MakeAiProfile(newRow),
 	}, nil
 }
 
@@ -390,22 +373,16 @@ func doSelfHealing(sid string, idx int, missing string, cache *SheetCacheData) {
 	go QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, idx, fullRow)
 }
 
-// [TỐI ƯU] Tạo Note sử dụng String Concatenation & Fix Logic Count
 func tao_ghi_chu_chuan(oldNote, newStatus, mode string) string {
 	nowFull := time.Now().Add(7 * time.Hour).Format("02/01/2006 15:04:05")
-	if mode == "new" { return newStatus + "\n" + nowFull }
+	if mode == "new" { return fmt.Sprintf("%s\n%s", newStatus, nowFull) }
 	
 	count := 0
 	oldNote = strings.TrimSpace(oldNote)
 	lines := strings.Split(oldNote, "\n")
 	if idx := strings.Index(oldNote, "(Lần"); idx != -1 {
 		end := strings.Index(oldNote[idx:], ")")
-		if end != -1 {
-			// Parse thủ công tránh overhead của Sscanf
-			if c, err := strconv.Atoi(strings.TrimSpace(oldNote[idx+len("(Lần") : idx+end])); err == nil {
-				count = c
-			}
-		}
+		if end != -1 { fmt.Sscanf(oldNote[idx+len("(Lần"):idx+end], "%d", &count) }
 	}
 	if count == 0 { count = 1 }
 
@@ -428,5 +405,5 @@ func tao_ghi_chu_chuan(oldNote, newStatus, mode string) string {
 	if st == "" && len(lines) > 0 { st = lines[0] }
 	if st == "" { st = "Đang chạy" }
 	
-	return st + "\n" + nowFull + " (Lần " + strconv.Itoa(count) + ")"
+	return fmt.Sprintf("%s\n%s (Lần %d)", st, nowFull, count)
 }
