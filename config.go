@@ -2,17 +2,26 @@ package main
 
 import "regexp"
 
+// ============================================================
+// 🟢 CẤU HÌNH GOOGLE SHEETS & HỆ THỐNG
+// ============================================================
+
 const (
+	// ID của file Google Sheet Master (File mẫu hoặc file quản lý chính)
+	// Đây là chuỗi ký tự nằm trên URL của Google Sheet
 	SPREADSHEET_ID_MASTER = "1r71kCCd9plRqXIWKQ2-GMUp-UXH21ISmBOObbQxMZVs"
-	KEY_SEPARATOR         = "__"
+	
+	// Ký tự phân cách khi tạo Key cho Cache (Ví dụ: SheetID__SheetName)
+	KEY_SEPARATOR = "__"
 )
 
+// Danh sách tên các Sheet (Tab) trong file Excel
 var SHEET_NAMES = struct {
-	USER_NAME    string
-	DATA_TIKTOK  string
-	EMAIL_LOGGER string
-	POST_LOGGER  string
-	ERROR_LOGGER string
+	USER_NAME    string // Sheet chứa danh sách User sử dụng tool
+	DATA_TIKTOK  string // Sheet chứa dữ liệu nick TikTok (quan trọng nhất)
+	EMAIL_LOGGER string // Sheet ghi log OTP/Email gửi về
+	POST_LOGGER  string // Sheet ghi log lịch sử đăng bài
+	ERROR_LOGGER string // Sheet ghi log lỗi hệ thống
 }{
 	USER_NAME:    "UserName",
 	DATA_TIKTOK:  "DataTiktok",
@@ -21,73 +30,99 @@ var SHEET_NAMES = struct {
 	ERROR_LOGGER: "ErrorLogger",
 }
 
+// Map dùng để copy sheet mẫu khi tạo mới cho user
+// Key: Tên sheet hệ thống - Value: Tên sheet mẫu trong file Master
 var TEMPLATE_SHEETS = map[string]string{
 	"DataTiktok":  "Mẫu DataTiktok",
 	"EmailLogger": "Mẫu EmailLogger",
 	"PostLogger":  "Mẫu PostLogger",
 }
 
+// ============================================================
+// 🟢 CẤU HÌNH PHẠM VI DỮ LIỆU (RANGES)
+// ============================================================
+
 var RANGES = struct {
-	DATA_START_ROW       int
-	DATA_MAX_ROW         int
-	EMAIL_START_ROW      int
-	EMAIL_LIMIT_ROWS     int
-	EMAIL_WINDOW_MINUTES int
-	MAX_ROW_CLEAN        int
-	DELETE_COUNT         int
-	LIMIT_COL_FULL       string
+	DATA_START_ROW       int    // Dòng bắt đầu chứa dữ liệu nick (thường bỏ qua Header)
+	DATA_MAX_ROW         int    // Giới hạn số dòng tối đa đọc để tránh quá tải RAM
+	EMAIL_START_ROW      int    // Dòng bắt đầu ghi log Email
+	EMAIL_LIMIT_ROWS     int    // Số lượng mail tối đa xử lý 1 lần
+	EMAIL_WINDOW_MINUTES int    // Chỉ quét mail trong khoảng thời gian này (phút) đổ lại
+	MAX_ROW_CLEAN        int    // Ngưỡng số dòng để kích hoạt dọn dẹp file Log
+	DELETE_COUNT         int    // Số dòng sẽ xóa mỗi khi dọn dẹp
+	LIMIT_COL_FULL       string // Tên cột cuối cùng của bảng dữ liệu (Ví dụ: BI)
 }{
-	DATA_START_ROW:       11,
-	DATA_MAX_ROW:         10000,
-	EMAIL_START_ROW:      112,
-	EMAIL_LIMIT_ROWS:     500,
-	EMAIL_WINDOW_MINUTES: 60,
-	MAX_ROW_CLEAN:        1112,
-	DELETE_COUNT:         500,
-	LIMIT_COL_FULL:       "BI", 
+	DATA_START_ROW:       11,    // Dữ liệu bắt đầu từ dòng 11
+	DATA_MAX_ROW:         10000, // Đọc tối đa 10.000 nick
+	EMAIL_START_ROW:      112,   // Log mail bắt đầu từ dòng 112
+	EMAIL_LIMIT_ROWS:     500,   // Đọc 500 mail gần nhất
+	EMAIL_WINDOW_MINUTES: 60,    // Chỉ lấy mail trong 60 phút gần nhất
+	MAX_ROW_CLEAN:        1112,  // Nếu log vượt quá 1112 dòng thì dọn dẹp
+	DELETE_COUNT:         500,   // Xóa bớt 500 dòng cũ
+	LIMIT_COL_FULL:       "BI",  // Cột BI tương ứng với index 60 (tổng 61 cột)
 }
+
+// ============================================================
+// 🟢 CẤU HÌNH CACHE & PERFORMANCE
+// ============================================================
 
 var CACHE = struct {
-	SHEET_VALID_MS  int64
-	SHEET_ERROR_MS  int64
-	SHEET_MAX_KEYS  int
-	TOKEN_MAX_KEYS  int
-	MAIL_CACHE_TTL  int64
-	TOKEN_TTL_MS    int64
-	CLEAN_COL_LIMIT int
+	SHEET_VALID_MS  int64 // Thời gian Cache dữ liệu Sheet (ms) - 5 phút
+	SHEET_ERROR_MS  int64 // Thời gian Cache lỗi (tránh retry liên tục) - 1 phút
+	SHEET_MAX_KEYS  int   // Số lượng Sheet tối đa lưu trong RAM
+	TOKEN_MAX_KEYS  int   // Số lượng Token User tối đa lưu trong RAM
+	MAIL_CACHE_TTL  int64 // Thời gian Cache kết quả đọc Mail - 10 giây
+	TOKEN_TTL_MS    int64 // Thời gian sống của Token - 1 giờ
+	CLEAN_COL_LIMIT int   // Số cột tối đa cần "làm sạch" (Trim/Lowercase) để search nhanh
 }{
-	SHEET_VALID_MS:  300000, 
-	SHEET_ERROR_MS:  60000,  
-	SHEET_MAX_KEYS:  50,
-	TOKEN_MAX_KEYS:  5000,
-	MAIL_CACHE_TTL:  10000,   
-	TOKEN_TTL_MS:    3600000, 
-	CLEAN_COL_LIMIT: 61,       
+	SHEET_VALID_MS:  300000,  // 300,000ms = 5 phút
+	SHEET_ERROR_MS:  60000,   // 60,000ms = 1 phút
+	SHEET_MAX_KEYS:  50,      // Cache 50 file Excel
+	TOKEN_MAX_KEYS:  5000,    // Cache 5000 user
+	MAIL_CACHE_TTL:  10000,   // 10s
+	TOKEN_TTL_MS:    3600000, // 1 giờ
+	CLEAN_COL_LIMIT: 61,      // Cache sạch 61 cột
 }
 
+// Cấu hình hàng đợi ghi dữ liệu (Write Queue) để tránh lỗi "Too Many Requests" từ Google
 var QUEUE = struct {
-	FLUSH_INTERVAL_MS int64
-	BATCH_LIMIT_BASE  int
+	FLUSH_INTERVAL_MS int64 // Thời gian xả hàng đợi ghi xuống đĩa (3 giây/lần)
+	BATCH_LIMIT_BASE  int   // Số lượng dòng tối đa ghi 1 lần
 }{
-	FLUSH_INTERVAL_MS: 3000, 
-	BATCH_LIMIT_BASE:  500,
+	FLUSH_INTERVAL_MS: 1000, // 3 giây
+	BATCH_LIMIT_BASE:  500,  // 500 dòng
 }
+
+// ============================================================
+// 🟢 MAPPING CHỈ SỐ CỘT (INDEX) - QUAN TRỌNG NHẤT
+// ============================================================
+// Định nghĩa vị trí các cột trong file Excel (Bắt đầu từ 0)
 
 var INDEX_DATA_TIKTOK = struct {
+	// --- Nhóm 1: Thông tin cơ bản & Login ---
 	STATUS int; NOTE int; DEVICE_ID int; USER_ID int; USER_SEC int; USER_NAME int; EMAIL int;
 	NICK_NAME int; PASSWORD int; PASSWORD_EMAIL int; RECOVERY_EMAIL int; TWO_FA int;
+	
+	// --- Nhóm 2: Thông tin thiết bị & Cookies ---
 	PHONE int; BIRTHDAY int; CLIENT_ID int; REFRESH_TOKEN int; ACCESS_TOKEN int;
 	COOKIE int; USER_AGENT int; PROXY int; PROXY_EXPIRED int; CREATE_COUNTRY int; CREATE_TIME int;
 	
+	// --- Nhóm 3: Chỉ số hoạt động (KPIs) ---
 	STATUS_POST int; DAILY_POST_LIMIT int; TODAY_POST_COUNT int; DAILY_FOLLOW_LIMIT int; TODAY_FOLLOW_COUNT int; LAST_ACTIVE_DATE int;
 	FOLLOWER_COUNT int; FOLLOWING_COUNT int; LIKES_COUNT int; VIDEO_COUNT int; STATUS_LIVE int;
+	
+	// --- Nhóm 4: Livestream ---
 	LIVE_PHONE_ACCESS int; LIVE_STUDIO_ACCESS int; LIVE_KEY int; LAST_LIVE_DURATION int;
+	
+	// --- Nhóm 5: TikTok Shop & Affiliate ---
 	SHOP_ROLE int; SHOP_ID int; PRODUCT_COUNT int; SHOP_HEALTH int; TOTAL_ORDERS int; TOTAL_REVENUE int; COMMISSION_RATE int;
 	
+	// --- Nhóm 6: Cấu hình Nội dung & AI ---
 	SIGNATURE int; DEFAULT_CATEGORY int; DEFAULT_PRODUCT int; PREFERRED_KEYWORDS int; PREFERRED_HASHTAGS int;
 	WRITING_STYLE int; MAIN_GOAL int; DEFAULT_CTA int; CONTENT_LENGTH int; CONTENT_TYPE int;
 	TARGET_AUDIENCE int; VISUAL_STYLE int; AI_PERSONA int; BANNED_KEYWORDS int; CONTENT_LANGUAGE int; COUNTRY int;
 }{
+	// Khởi tạo giá trị Index (Cột A = 0, B = 1, ...)
 	STATUS: 0, NOTE: 1, DEVICE_ID: 2, USER_ID: 3, USER_SEC: 4, USER_NAME: 5, EMAIL: 6,
 	NICK_NAME: 7, PASSWORD: 8, PASSWORD_EMAIL: 9, RECOVERY_EMAIL: 10, TWO_FA: 11,
 	PHONE: 12, BIRTHDAY: 13, CLIENT_ID: 14, REFRESH_TOKEN: 15, ACCESS_TOKEN: 16,
@@ -103,6 +138,11 @@ var INDEX_DATA_TIKTOK = struct {
 	TARGET_AUDIENCE: 55, VISUAL_STYLE: 56, AI_PERSONA: 57, BANNED_KEYWORDS: 58, CONTENT_LANGUAGE: 59, COUNTRY: 60,
 }
 
+// ============================================================
+// 🟢 ĐỊNH NGHĨA TRẠNG THÁI (STATUS)
+// ============================================================
+
+// Các trạng thái hệ thống dùng để ĐỌC và so sánh logic (viết thường)
 var STATUS_READ = struct {
 	RUNNING     string
 	WAITING     string
@@ -121,6 +161,7 @@ var STATUS_READ = struct {
 	COMPLETED:   "hoàn thành",
 }
 
+// Các trạng thái dùng để GHI vào file Excel (Viết hoa đẹp để user xem)
 var STATUS_WRITE = struct {
 	RUNNING     string
 	WAITING     string
@@ -132,10 +173,17 @@ var STATUS_WRITE = struct {
 	WAITING:     "Đang chờ",
 	REGISTERING: "Đang đăng ký",
 	WAIT_REG:    "Chờ đăng ký",
-	ATTENTION:   "Chú ý",
+	ATTENTION:   "Chú ý", // Dùng khi nick bị lỗi hoặc cần check tay
 }
 
+// ============================================================
+// 🟢 REGEX PATTERNS
+// ============================================================
+
 var (
-	REGEX_DATE  = regexp.MustCompile(`(\d{1,2}\/\d{1,2}\/\d{4})`)
+	// Regex nhận diện ngày tháng: dd/mm/yyyy
+	REGEX_DATE = regexp.MustCompile(`(\d{1,2}\/\d{1,2}\/\d{4})`)
+	
+	// Regex nhận diện số lần chạy trong ghi chú: (Lần 5)
 	REGEX_COUNT = regexp.MustCompile(`\(Lần\s*(\d+)\)`)
 )
