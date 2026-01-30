@@ -265,3 +265,15 @@ func MakeAiProfile(row []interface{}) AiProfile {
 		AiPersona: gs(row, 57), BannedKeywords: gs(row, 58), ContentLanguage: gs(row, 59), Country: gs(row, 60),
 	}
 }
+
+// Hàm hỗ trợ xóa phần tử khỏi Status Map
+func removeFromStatusMap(m map[string][]int, status string, targetIdx int) {
+	if list, ok := m[status]; ok {
+		for i, v := range list {
+			if v == targetIdx {
+				m[status] = append(list[:i], list[i+1:]...)
+				return
+			}
+		}
+	}
+}
