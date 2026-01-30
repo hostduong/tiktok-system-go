@@ -311,17 +311,6 @@ func removeFromIntList(list *[]int, target int) {
 	}
 }
 
-// Hàm hỗ trợ xóa phần tử khỏi Status Map
-func removeFromStatusMap(m map[string][]int, status string, targetIdx int) {
-	if list, ok := m[status]; ok {
-		for i, v := range list {
-			if v == targetIdx {
-				m[status] = append(list[:i], list[i+1:]...)
-				return
-			}
-		}
-	}
-}
 
 func tao_ghi_chu_chuan_update(oldNote, content, newStatus string) string {
 	nowFull := time.Now().Add(7 * time.Hour).Format("02/01/2006 15:04:05")
