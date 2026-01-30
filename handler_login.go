@@ -62,8 +62,6 @@ type PriorityStep struct {
 	PrioID  int    // Độ ưu tiên (1 cao nhất). Dùng để log hoặc debug.
 }
 
-// ⚠️ ĐÃ XÓA CriteriaSet và FilterParams TẠI ĐÂY (VÌ ĐÃ CÓ BÊN UTILS.GO)
-
 // =================================================================================================
 // 🟢 HANDLER CHÍNH: TIẾP NHẬN & ĐIỀU PHỐI REQUEST
 // =================================================================================================
@@ -315,8 +313,6 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	return nil, fmt.Errorf("Không còn tài khoản phù hợp")
 }
 
-// ⚠️ ĐÃ XÓA parseCriteriaSet, parseFilterParams, checkCriteriaMatch, isRowMatched TẠI ĐÂY
-
 // =================================================================================================
 // 🛠 CÁC HÀM HỖ TRỢ KHÁC (STATUS, PRIORITY, CLEANUP)
 // =================================================================================================
@@ -422,6 +418,7 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 		if INDEX_DATA_TIKTOK.STATUS < CACHE.CLEAN_COL_LIMIT { cache.CleanValues[cIdx][INDEX_DATA_TIKTOK.STATUS] = CleanString(cSt) }
 		if INDEX_DATA_TIKTOK.NOTE < CACHE.CLEAN_COL_LIMIT { cache.CleanValues[cIdx][INDEX_DATA_TIKTOK.NOTE] = CleanString(cNote) }
 		if oldCSt != CleanString(cSt) {
+			// GỌI HÀM BÊN UTILS HOẶC HANDLER_UPDATE
 			removeFromStatusMap(cache.StatusMap, oldCSt, cIdx)
 			newCSt := CleanString(cSt)
 			cache.StatusMap[newCSt] = append(cache.StatusMap[newCSt], cIdx)
@@ -460,16 +457,8 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 	}, nil
 }
 
-func removeFromStatusMap(m map[string][]int, status string, targetIdx int) {
-	if list, ok := m[status]; ok {
-		for i, v := range list {
-			if v == targetIdx {
-				m[status] = append(list[:i], list[i+1:]...)
-				return
-			}
-		}
-	}
-}
+// ⚠️ ĐÃ XÓA HÀM removeFromStatusMap TẠI ĐÂY (VÌ ĐÃ CÓ BÊN HANDLER_UPDATE.GO)
+// Nếu Build vẫn lỗi undefined removeFromStatusMap, bạn hãy chuyển hàm này sang utils.go
 
 func doSelfHealing(sid string, idx int, missing string, cache *SheetCacheData) {
 	msg := "Nick thiếu " + missing + "\n" + time.Now().Format("02/01/2006 15:04:05")
