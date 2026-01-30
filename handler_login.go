@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
 
 /*
@@ -60,6 +61,8 @@ type PriorityStep struct {
 	IsEmpty bool   // true: Tìm nick chưa có DeviceId.
 	PrioID  int    // Độ ưu tiên (1 cao nhất). Dùng để log hoặc debug.
 }
+
+// ⚠️ ĐÃ XÓA CriteriaSet và FilterParams TẠI ĐÂY (VÌ ĐÃ CÓ BÊN UTILS.GO)
 
 // =================================================================================================
 // 🟢 HANDLER CHÍNH: TIẾP NHẬN & ĐIỀU PHỐI REQUEST
@@ -312,6 +315,8 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	return nil, fmt.Errorf("Không còn tài khoản phù hợp")
 }
 
+// ⚠️ ĐÃ XÓA parseCriteriaSet, parseFilterParams, checkCriteriaMatch, isRowMatched TẠI ĐÂY
+
 // =================================================================================================
 // 🛠 CÁC HÀM HỖ TRỢ KHÁC (STATUS, PRIORITY, CLEANUP)
 // =================================================================================================
@@ -453,6 +458,17 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 		RowIndex: RANGES.DATA_START_ROW + idx, SystemEmail: email,
 		AuthProfile: MakeAuthProfile(newRow), ActivityProfile: MakeActivityProfile(newRow), AiProfile: MakeAiProfile(newRow),
 	}, nil
+}
+
+func removeFromStatusMap(m map[string][]int, status string, targetIdx int) {
+	if list, ok := m[status]; ok {
+		for i, v := range list {
+			if v == targetIdx {
+				m[status] = append(list[:i], list[i+1:]...)
+				return
+			}
+		}
+	}
 }
 
 func doSelfHealing(sid string, idx int, missing string, cache *SheetCacheData) {
