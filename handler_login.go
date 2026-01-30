@@ -35,8 +35,8 @@ type PriorityStep struct {
 
 // Cấu trúc chứa các tham số lọc nâng cao từ Client
 type FilterParams struct {
-	MatchCols    map[int][]string // Cột phải khớp chính xác (Match)
-	ContainsCols map[int][]string // Cột phải chứa từ khóa (Contains)
+	MatchCols    map[int][]string // Cột phải khớp chính xác (Match) - Logic OR trong mảng
+	ContainsCols map[int][]string // Cột phải chứa từ khóa (Contains) - Logic OR trong mảng
 	MinCols      map[int]float64  // Cột có giá trị >= Min
 	MaxCols      map[int]float64  // Cột có giá trị <= Max
 	TimeCols     map[int]float64  // Cột thời gian trong khoảng X giờ gần nhất
@@ -55,7 +55,7 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 	// 2. Lấy thông tin Token từ Context (đã xác thực ở Middleware)
 	tokenData, ok := r.Context().Value("tokenData").(*TokenData)
 	if !ok {
-		return // Nếu không có token, dừng xử lý (Middleware đã chặn rồi)
+		return // Nếu không có token, dừng xử lý
 	}
 
 	sid := tokenData.SpreadsheetID           // ID file Google Sheet
@@ -165,24 +165,25 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	// 🟢 NHÁNH 2: TÌM KIẾM NÂNG CAO (Khi có Filters - match_col, min_col...)
 	// =================================================================================
 	if filters.HasFilter {
-		// Duyệt từng dòng từ trên xuống dưới
+		// Duyệt từng dòng từ trên xuống dưới (Quét tuyến tính)
 		for i, cleanRow := range cacheData.CleanValues {
 			// B1: Kiểm tra điều kiện lọc (Fail Fast - Sai là bỏ qua ngay)
 			if !isRowMatched(cleanRow, cacheData.RawValues[i], filters) {
 				continue
 			}
 
-			// B2: CHỐT CHẶN TRẠNG THÁI (Status Guard) - Logic quan trọng mới thêm
+			// B2: CHỐT CHẶN TRẠNG THÁI (Status Guard) - Quan trọng!
+			// Đảm bảo không lấy nhầm nick Login khi đang Register và ngược lại
 			currentStatus := cleanRow[INDEX_DATA_TIKTOK.STATUS]
 			isValidStatus := false
 
 			if action == "register" {
-				// Register chỉ nhận: đăng ký, đang đăng ký, chờ đăng ký
+				// Register chỉ nhận nhóm: đăng ký, đang đăng ký, chờ đăng ký
 				if currentStatus == STATUS_READ.REGISTER || currentStatus == STATUS_READ.REGISTERING || currentStatus == STATUS_READ.WAIT_REG {
 					isValidStatus = true
 				}
 			} else if action == "login" || action == "login_reset" {
-				// Login nhận: đăng nhập, đang chạy, đang chờ
+				// Login nhận nhóm: đăng nhập, đang chạy, đang chờ
 				if currentStatus == STATUS_READ.LOGIN || currentStatus == STATUS_READ.RUNNING || currentStatus == STATUS_READ.WAITING {
 					isValidStatus = true
 				}
@@ -191,9 +192,7 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 					isValidStatus = true
 				}
 			} else if action == "auto" {
-				// Auto nhận tất cả (trừ Hoàn thành nếu không reset)
-				// Code đơn giản hóa: Auto chấp nhận nếu nó không phải là Rác/Lỗi
-				// (Logic auto sẽ lọc kỹ hơn ở bước Quality, ở đây tạm cho qua để linh hoạt)
+				// Auto nhận tất cả (Vì Auto sẽ tự chuyển type login/register tương ứng)
 				isValidStatus = true
 			} else {
 				// View Only hoặc trường hợp khác -> Cho qua
@@ -240,7 +239,7 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 			isReset = true
 		}
 
-		// Xây dựng danh sách các bước ưu tiên (VD: Tìm nick đang chạy trước, rồi mới tìm nick mới)
+		// Xây dựng danh sách các bước ưu tiên (Strategy Pattern)
 		steps := buildPrioritySteps(action, isReset)
 
 		for _, step := range steps {
@@ -325,7 +324,7 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 }
 
 // ------------------------------------------------------------------------------------------------
-// 🛠 BỘ HÀM HỖ TRỢ FILTER (ĐÃ FIX getFloatVal)
+// 🛠 BỘ HÀM HỖ TRỢ FILTER (ĐÃ XÓA BỎ SEARCH_COL)
 // ------------------------------------------------------------------------------------------------
 
 func parseFilterParams(body map[string]interface{}) FilterParams {
@@ -340,6 +339,7 @@ func parseFilterParams(body map[string]interface{}) FilterParams {
 
 	for k, v := range body {
 		// Duyệt qua các key của JSON body để tìm điều kiện lọc
+		// Logic: OR bên trong mảng giá trị
 		if strings.HasPrefix(k, "match_col_") {
 			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "match_col_")); err == nil {
 				f.MatchCols[idx] = ToSlice(v)
@@ -371,18 +371,15 @@ func parseFilterParams(body map[string]interface{}) FilterParams {
 					f.HasFilter = true
 				}
 			}
-		} else if strings.HasPrefix(k, "search_col_") {
-			// Hỗ trợ legacy key
-			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "search_col_")); err == nil {
-				f.MatchCols[idx] = ToSlice(v)
-				f.HasFilter = true
-			}
 		}
+		// Đã xóa bỏ search_col để tránh dư thừa
 	}
 	return f
 }
 
 func isRowMatched(cleanRow []string, rawRow []interface{}, f FilterParams) bool {
+	// Logic: AND giữa các cột (Phải thỏa mãn tất cả điều kiện)
+
 	// 1. Kiểm tra Match (So khớp chính xác)
 	for idx, targets := range f.MatchCols {
 		cellVal := ""
@@ -427,7 +424,7 @@ func isRowMatched(cleanRow []string, rawRow []interface{}, f FilterParams) bool 
 	}
 
 	// 3. Kiểm tra Min/Max (So sánh số học)
-	// Sử dụng getFloatVal(row, idx) với 2 tham số -> Fix lỗi build
+	// Sử dụng getFloatVal(row, idx) với 2 tham số -> Đã chuẩn
 	for idx, minVal := range f.MinCols {
 		if val, ok := getFloatVal(rawRow, idx); !ok || val < minVal {
 			return false
@@ -515,7 +512,7 @@ func getCleanupIndices(cache *SheetCacheData, deviceId string, targetIdx int, is
 	var list []int
 	// Các trạng thái cần dọn dẹp: Đang chạy & Đang đăng ký
 	checkList := []string{STATUS_READ.RUNNING, STATUS_READ.REGISTERING}
-	
+
 	// Nếu là Reset -> Cần dọn dẹp cả nick Completed (vì nick Completed đang được lôi ra chạy lại)
 	if isResetCompleted {
 		checkList = append(checkList, STATUS_READ.COMPLETED)
@@ -535,7 +532,7 @@ func getCleanupIndices(cache *SheetCacheData, deviceId string, targetIdx int, is
 	return list
 }
 
-// 🔥 HÀM COMMIT VÀ TRẢ VỀ: ĐÃ CÓ LOGIC DỌN DẸP GIỮ LẠI SỐ LẦN CHẠY
+// 🔥 HÀM COMMIT VÀ TRẢ VỀ: CÓ LOGIC DỌN DẸP GIỮ LẠI SỐ LẦN CHẠY & LOGIC STATUS GUARD
 func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, typ, email, action string, priority int) (*LoginResponse, error) {
 	// 1. Nếu chỉ xem -> Trả về luôn
 	if action == "view_only" {
@@ -569,7 +566,7 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 	tNote := tao_ghi_chu_chuan(oldNote, tSt, mode)
 
 	STATE.SheetMutex.Lock()
-	
+
 	// --- XỬ LÝ DỌN DẸP (CLEANUP) CÁC NICK CŨ ---
 	cleanupIndices := getCleanupIndices(cache, deviceId, idx, isResetCompleted)
 
@@ -580,9 +577,9 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 			cSt = STATUS_WRITE.WAIT_REG // "Chờ đăng ký"
 		}
 
-		// LOGIC MỚI: Giữ lại thông tin lịch sử
+		// LOGIC QUAN TRỌNG: Giữ lại thông tin lịch sử từ note cũ
 		cOldNote := SafeString(cache.RawValues[cIdx][INDEX_DATA_TIKTOK.NOTE])
-		
+
 		// Dùng hàm chuẩn với mode "normal" để giữ nguyên count và cập nhật thời gian
 		cNote := tao_ghi_chu_chuan(cOldNote, cSt, "normal")
 
@@ -619,7 +616,7 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 
 	// --- CẬP NHẬT NICK ĐÍCH (TARGET) ---
 	oldCleanSt := cache.CleanValues[idx][INDEX_DATA_TIKTOK.STATUS]
-	
+
 	cache.RawValues[idx][INDEX_DATA_TIKTOK.STATUS] = tSt       // Set Status mới
 	cache.RawValues[idx][INDEX_DATA_TIKTOK.NOTE] = tNote       // Set Note mới
 	cache.RawValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId // Set chủ sở hữu
@@ -683,7 +680,7 @@ func doSelfHealing(sid string, idx int, missing string, cache *SheetCacheData) {
 		// Set trạng thái Chú ý
 		cache.RawValues[idx][INDEX_DATA_TIKTOK.STATUS] = STATUS_WRITE.ATTENTION
 		cache.RawValues[idx][INDEX_DATA_TIKTOK.NOTE] = msg
-		
+
 		// Update map trạng thái
 		if idx < len(cache.CleanValues) && INDEX_DATA_TIKTOK.STATUS < len(cache.CleanValues[idx]) {
 			oldSt := cache.CleanValues[idx][INDEX_DATA_TIKTOK.STATUS]
@@ -695,7 +692,7 @@ func doSelfHealing(sid string, idx int, missing string, cache *SheetCacheData) {
 	fullRow := make([]interface{}, len(cache.RawValues[idx]))
 	copy(fullRow, cache.RawValues[idx])
 	STATE.SheetMutex.Unlock()
-	
+
 	// Ghi đĩa
 	go QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, idx, fullRow)
 }
@@ -703,7 +700,7 @@ func doSelfHealing(sid string, idx int, missing string, cache *SheetCacheData) {
 // Hàm tạo ghi chú chuẩn format: Trạng thái + Thời gian + (Lần x)
 func tao_ghi_chu_chuan(oldNote, newStatus, mode string) string {
 	nowFull := time.Now().Add(7 * time.Hour).Format("02/01/2006 15:04:05")
-	
+
 	// Nếu là nick mới hoàn toàn (append)
 	if mode == "new" {
 		return fmt.Sprintf("%s\n%s", newStatus, nowFull)
@@ -713,7 +710,7 @@ func tao_ghi_chu_chuan(oldNote, newStatus, mode string) string {
 	count := 0
 	oldNote = strings.TrimSpace(oldNote)
 	lines := strings.Split(oldNote, "\n")
-	
+
 	// Parse chuỗi "(Lần x)"
 	if idx := strings.Index(oldNote, "(Lần"); idx != -1 {
 		end := strings.Index(oldNote[idx:], ")")
