@@ -382,16 +382,6 @@ func updateRowCache(cache *SheetCacheData, idx int, newSt, newNote, newDev strin
 	}
 }
 
-// Helper: Xóa phần tử khỏi mảng int (Dùng cho UnassignedList)
-func removeFromIntList(list *[]int, target int) {
-	for i, v := range *list {
-		if v == target {
-			*list = append((*list)[:i], (*list)[i+1:]...)
-			return
-		}
-	}
-}
-
 // Phân tích dữ liệu update bổ sung (chỉ nhận col_X)
 func parseUpdateDataLogin(body map[string]interface{}) map[int]interface{} {
 	cols := make(map[int]interface{})
