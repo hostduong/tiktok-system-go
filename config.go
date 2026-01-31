@@ -195,15 +195,3 @@ var STATUS_WRITE = struct {
 	WAIT_REG:    "Chờ đăng ký",
 	ATTENTION:   "Chú ý", // Dùng khi nick lỗi
 }
-
-// =================================================================================================
-// 🟢 CÁC BIỂU THỨC CHÍNH QUY (REGEX)
-// =================================================================================================
-
-var (
-	// Regex nhận diện ngày tháng: dd/mm/yyyy
-	REGEX_DATE = regexp.MustCompile(`(\d{1,2}\/\d{1,2}\/\d{4})`)
-	
-	// Regex nhận diện số lần chạy trong ghi chú: (Lần 5)
-	REGEX_COUNT = regexp.MustCompile(`\(Lần\s*(\d+)\)`)
-)
