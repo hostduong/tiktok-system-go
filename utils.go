@@ -3,42 +3,55 @@ package main
 import (
 	"fmt"
 	"math"
+	"regexp" // 🔥 Thêm thư viện Regex
 	"strconv"
 	"strings"
 	"time"
 
-	"golang.org/x/text/unicode/norm" // 🔥 THƯ VIỆN CHUẨN HÓA UNICODE
+	"golang.org/x/text/unicode/norm"
 )
 
 // =================================================================================================
-// 🟢 1. CÁC HÀM TIỆN ÍCH CƠ BẢN (HELPER FUNCTIONS)
+// 🟢 1. CÁC HÀM TIỆN ÍCH CƠ BẢN
 // =================================================================================================
 
-// CleanString: Chuẩn hóa dữ liệu về dạng chuỗi viết thường, cắt khoảng trắng VÀ CHUẨN HÓA NFC.
-// Giống hệt logic .normalize('NFC') bên Node.js để xử lý lỗi tiếng Việt.
+var REGEX_INVISIBLE = regexp.MustCompile(`[\x{00A0}\x{200B}\x{200C}\x{200D}\x{FEFF}]`)
+
+// CleanString: Chuẩn hóa dữ liệu + FIX LỖI DẤU + XÓA KÝ TỰ ẨN (FIX TRIỆT ĐỂ)
 func CleanString(v interface{}) string {
 	if v == nil { return "" }
 	// Nếu là số float64, ép kiểu giữ nguyên
 	if f, ok := v.(float64); ok { return strings.TrimSpace(strconv.FormatFloat(f, 'f', -1, 64)) }
 	
-	// Ép về string, trim space, lowercase
-	s := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", v)))
+	// 1. Chuyển về string, viết thường
+	s := strings.ToLower(fmt.Sprintf("%v", v))
 	
-	// 🔥 QUAN TRỌNG: Chuẩn hóa NFC (Để "đang chạy" trên Sheet khớp với "đang chạy" trong Config)
-	return norm.NFC.String(s)
+	// 2. Chuẩn hóa Unicode NFC (Gộp dấu)
+	s = norm.NFC.String(s)
+	
+	// 3. 🔥 XÓA KÝ TỰ ẨN (Nguyên nhân lỗi): Thay Non-breaking space bằng dấu cách
+	s = strings.ReplaceAll(s, "\u00A0", " ")
+	
+	// 4. Xóa các ký tự zero-width nếu có
+	s = REGEX_INVISIBLE.ReplaceAllString(s, "")
+
+	// 5. Cắt khoảng trắng thừa đầu đuôi
+	return strings.TrimSpace(s)
 }
 
-// SafeString: Giống CleanString nhưng GIỮ NGUYÊN HOA THƯỜNG (Cũng cần NFC)
+// SafeString: Giống CleanString nhưng GIỮ NGUYÊN HOA THƯỜNG
 func SafeString(v interface{}) string {
 	if v == nil { return "" }
 	if f, ok := v.(float64); ok { return strings.TrimSpace(strconv.FormatFloat(f, 'f', -1, 64)) }
 	
-	s := strings.TrimSpace(fmt.Sprintf("%v", v))
-	// 🔥 Chuẩn hóa NFC cho cả Note và Password để tránh lỗi ký tự lạ
-	return norm.NFC.String(s)
+	s := fmt.Sprintf("%v", v)
+	s = norm.NFC.String(s)
+	s = strings.ReplaceAll(s, "\u00A0", " ")
+	s = REGEX_INVISIBLE.ReplaceAllString(s, "")
+	return strings.TrimSpace(s)
 }
 
-// toFloat: Cố gắng chuyển mọi kiểu dữ liệu về float64
+// ... (Các hàm toFloat, getFloatVal, ToSlice, ConvertSerialDate... giữ nguyên như cũ) ...
 func toFloat(v interface{}) (float64, bool) {
 	if f, ok := v.(float64); ok { return f, true }
 	if s, ok := v.(string); ok {
@@ -47,13 +60,11 @@ func toFloat(v interface{}) (float64, bool) {
 	return 0, false
 }
 
-// getFloatVal: Lấy giá trị số tại cột cụ thể
 func getFloatVal(row []interface{}, idx int) (float64, bool) {
 	if idx < 0 || idx >= len(row) { return 0, false }
 	return toFloat(row[idx])
 }
 
-// ToSlice: Chuyển input thành mảng String
 func ToSlice(v interface{}) []string {
 	if v == nil { return []string{} }
 	if arr, ok := v.([]interface{}); ok {
@@ -66,7 +77,6 @@ func ToSlice(v interface{}) []string {
 	return []string{}
 }
 
-// ConvertSerialDate: Chuyển đổi ngày tháng
 func ConvertSerialDate(v interface{}) int64 {
 	s := fmt.Sprintf("%v", v)
 	if strings.Contains(s, "/") {
@@ -84,9 +94,8 @@ func ConvertSerialDate(v interface{}) int64 {
 	return 0
 }
 
-// =================================================================================================
-// 🔥 2. BỘ MÁY LỌC (FILTER ENGINE)
-// =================================================================================================
+// ... (Copy phần FilterParams, parseCriteriaSet, checkCriteriaMatch, isRowMatched, KiemTraChatLuongClean, Struct Profiles... GIỮ NGUYÊN TỪ FILE CŨ CỦA BẠN) ...
+// (Phần dưới này logic không đổi, chỉ cần thay hàm CleanString ở trên là đủ để fix lỗi)
 
 type CriteriaSet struct {
 	MatchCols    map[int][]string
@@ -204,10 +213,6 @@ func isRowMatched(cleanRow []string, rawRow []interface{}, f FilterParams) bool 
 	return true
 }
 
-// =================================================================================================
-// 🟢 3. QUALITY CHECK
-// =================================================================================================
-
 type QualityResult struct { Valid bool; SystemEmail string; Missing string }
 
 func KiemTraChatLuongClean(cleanRow []string, action string) QualityResult {
@@ -232,10 +237,6 @@ func KiemTraChatLuongClean(cleanRow []string, action string) QualityResult {
 	}
 	return QualityResult{false, "", "unknown"}
 }
-
-// =================================================================================================
-// 🟢 4. PROFILES
-// =================================================================================================
 
 type AuthProfile struct { Status string `json:"status"`; Note string `json:"note"`; DeviceId string `json:"device_id"`; UserId string `json:"user_id"`; UserSec string `json:"user_sec"`; UserName string `json:"user_name"`; Email string `json:"email"`; NickName string `json:"nick_name"`; Password string `json:"password"`; PasswordEmail string `json:"password_email"`; RecoveryEmail string `json:"recovery_email"`; TwoFa string `json:"two_fa"`; Phone string `json:"phone"`; Birthday string `json:"birthday"`; ClientId string `json:"client_id"`; RefreshToken string `json:"refresh_token"`; AccessToken string `json:"access_token"`; Cookie string `json:"cookie"`; UserAgent string `json:"user_agent"`; Proxy string `json:"proxy"`; ProxyExpired string `json:"proxy_expired"`; CreateCountry string `json:"create_country"`; CreateTime string `json:"create_time"` }
 type ActivityProfile struct { StatusPost string `json:"status_post"`; DailyPostLimit string `json:"daily_post_limit"`; TodayPostCount string `json:"today_post_count"`; DailyFollowLimit string `json:"daily_follow_limit"`; TodayFollowCount string `json:"today_follow_count"`; LastActiveDate string `json:"last_active_date"`; FollowerCount string `json:"follower_count"`; FollowingCount string `json:"following_count"`; LikesCount string `json:"likes_count"`; VideoCount string `json:"video_count"`; StatusLive string `json:"status_live"`; LivePhoneAccess string `json:"live_phone_access"`; LiveStudioAccess string `json:"live_studio_access"`; LiveKey string `json:"live_key"`; LastLiveDuration string `json:"last_live_duration"`; ShopRole string `json:"shop_role"`; ShopId string `json:"shop_id"`; ProductCount string `json:"product_count"`; ShopHealth string `json:"shop_health"`; TotalOrders string `json:"total_orders"`; TotalRevenue string `json:"total_revenue"`; CommissionRate string `json:"commission_rate"` }
