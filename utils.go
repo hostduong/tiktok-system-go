@@ -221,6 +221,16 @@ func isRowMatched(cleanRow []string, rawRow []interface{}, f FilterParams) bool 
 	return true
 }
 
+// Hàm hỗ trợ xóa phần tử khỏi list int (Dùng cho UnassignedList)
+func removeFromIntList(list *[]int, target int) {
+	for i, v := range *list {
+		if v == target {
+			*list = append((*list)[:i], (*list)[i+1:]...)
+			return
+		}
+	}
+}
+
 type QualityResult struct { Valid bool; SystemEmail string; Missing string }
 func KiemTraChatLuongClean(cleanRow []string, action string) QualityResult {
 	if len(cleanRow) <= INDEX_DATA_TIKTOK.EMAIL { return QualityResult{false, "", "data_length"} }
