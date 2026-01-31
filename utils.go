@@ -18,14 +18,12 @@ import (
 // Regex xóa ký tự ẩn (Non-breaking space, Zero-width space...)
 var REGEX_INVISIBLE = regexp.MustCompile(`[\x{00A0}\x{200B}\x{200C}\x{200D}\x{FEFF}]`)
 
-// Regex nhận diện ngày tháng: dd/mm/yyyy & Regex nhận diện số lần chạy trong ghi chú: (Lần 5)
+// 🔥 ĐÃ CHUYỂN REGEX VỀ ĐÂY CHO ĐÚNG LOGIC ĐÓNG GÓI
 var (
-	REGEX_DATE = regexp.MustCompile(`(\d{1,2}\/\d{1,2}\/\d{4})`)
+	REGEX_DATE  = regexp.MustCompile(`(\d{1,2}\/\d{1,2}\/\d{4})`)
 	REGEX_COUNT = regexp.MustCompile(`\(Lần\s*(\d+)\)`)
 )
-// ⚠️ LƯU Ý: REGEX_DATE và REGEX_COUNT sử dụng từ config.go để tránh lỗi redeclared
 
-// Làm sạch chuỗi: Chuyển về chữ thường, chuẩn hóa Unicode NFC, xóa ký tự ẩn
 func CleanString(v interface{}) string {
 	if v == nil { return "" }
 	if f, ok := v.(float64); ok { return strings.TrimSpace(strconv.FormatFloat(f, 'f', -1, 64)) }
@@ -37,7 +35,6 @@ func CleanString(v interface{}) string {
 	return strings.TrimSpace(s)
 }
 
-// Làm sạch chuỗi nhưng GIỮ NGUYÊN HOA THƯỜNG (Dùng cho Note, Password...)
 func SafeString(v interface{}) string {
 	if v == nil { return "" }
 	if f, ok := v.(float64); ok { return strings.TrimSpace(strconv.FormatFloat(f, 'f', -1, 64)) }
@@ -49,7 +46,7 @@ func SafeString(v interface{}) string {
 	return strings.TrimSpace(s)
 }
 
-// Chuyển đổi Interface sang Float64 an toàn
+// ... (Các hàm toFloat, getFloatVal, ToSlice, ConvertSerialDate giữ nguyên) ...
 func toFloat(v interface{}) (float64, bool) {
 	if f, ok := v.(float64); ok { return f, true }
 	if s, ok := v.(string); ok {
@@ -58,13 +55,11 @@ func toFloat(v interface{}) (float64, bool) {
 	return 0, false
 }
 
-// Lấy giá trị Float tại cột index chỉ định
 func getFloatVal(row []interface{}, idx int) (float64, bool) {
 	if idx < 0 || idx >= len(row) { return 0, false }
 	return toFloat(row[idx])
 }
 
-// Chuyển Interface sang Slice String (Dùng cho mảng điều kiện lọc)
 func ToSlice(v interface{}) []string {
 	if v == nil { return []string{} }
 	if arr, ok := v.([]interface{}); ok {
@@ -77,7 +72,6 @@ func ToSlice(v interface{}) []string {
 	return []string{}
 }
 
-// Chuyển đổi ngày tháng Excel (Serial Date) sang Unix Millis
 func ConvertSerialDate(v interface{}) int64 {
 	s := fmt.Sprintf("%v", v)
 	if strings.Contains(s, "/") {
@@ -99,7 +93,6 @@ func ConvertSerialDate(v interface{}) int64 {
 // 🟢 2. CÁC HÀM QUẢN LÝ MAP/LIST DÙNG CHUNG
 // =================================================================================================
 
-// Xóa một chỉ số dòng (targetIdx) khỏi StatusMap
 func removeFromStatusMap(m map[string][]int, status string, targetIdx int) {
 	if list, ok := m[status]; ok {
 		for i, v := range list {
@@ -111,7 +104,6 @@ func removeFromStatusMap(m map[string][]int, status string, targetIdx int) {
 	}
 }
 
-// Xóa một chỉ số dòng (target) khỏi mảng int (Dùng cho UnassignedList)
 func removeFromIntList(list *[]int, target int) {
 	for i, v := range *list {
 		if v == target {
