@@ -3,199 +3,131 @@ package main
 import (
 	"encoding/json"
 	"net/http"
-	"strconv"
-	"strings"
-	"time"
 )
 
-func HandleSearchData(w http.ResponseWriter, r *http.Request) {
-	var body map[string]interface{}
-	json.NewDecoder(r.Body).Decode(&body)
+/*
+=================================================================================================
+📘 TÀI LIỆU API: TÌM KIẾM DỮ LIỆU (POST /tool/search)
+=================================================================================================
 
-	tokenData, ok := r.Context().Value("tokenData").(*TokenData)
-	if !ok {
-		return
+1. MỤC ĐÍCH:
+   - Tìm kiếm dữ liệu trong Sheet dựa trên nhiều điều kiện kết hợp.
+   - Hỗ trợ lọc AND (tất cả phải đúng) và OR (một trong các điều kiện đúng).
+   - Trả về kết quả dạng danh sách JSON.
+
+2. CẤU TRÚC BODY REQUEST:
+{
+  "token": "...",
+  "sheet": "DataTiktok",      // Tên sheet (Mặc định: DataTiktok)
+  "limit": 50,                // Số lượng kết quả tối đa (Mặc định: 1000)
+  "return_cols": [0, 1, 2, 6], // (Optional) Danh sách Index cột cần lấy. Nếu bỏ qua sẽ lấy hết.
+
+  // --- ĐIỀU KIỆN LỌC (Dùng chung cấu trúc với Login/Update) ---
+  "search_and": {
+      "match_col_0": ["đang chạy"],       // Cột 0 chính xác là "đang chạy"
+      "contains_col_6": ["@gmail.com"],   // Cột 6 chứa "@gmail.com"
+      "min_col_29": 1000                  // Cột 29 >= 1000
+  },
+  "search_or": { ... }
+}
+*/
+
+// Struct phản hồi kết quả tìm kiếm
+type SearchResponse struct {
+	Status    string                   `json:"status"`
+	Messenger string                   `json:"messenger"`
+	Count     int                      `json:"count"`
+	Data      []map[string]interface{} `json:"data"` // Mảng kết quả
+}
+
+func HandleSearchData(w http.ResponseWriter, r *http.Request) {
+	// 1. Giải mã JSON
+	var body map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"status":"false","messenger":"JSON Error"}`, 400); return
 	}
+
+	// 2. Xác thực Token
+	tokenData, ok := r.Context().Value("tokenData").(*TokenData)
+	if !ok { return }
 
 	sid := tokenData.SpreadsheetID
 	sheetName := CleanString(body["sheet"])
-	if sheetName == "" {
-		sheetName = SHEET_NAMES.DATA_TIKTOK
-	}
+	if sheetName == "" { sheetName = SHEET_NAMES.DATA_TIKTOK }
 
+	// 3. Tải dữ liệu Cache
 	cacheData, err := LayDuLieu(sid, sheetName, false)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": "Lỗi tải dữ liệu"})
 		return
 	}
 
-	criteriaMatch := make(map[int][]string)
-	criteriaContains := make(map[int][]string)
-	criteriaMin := make(map[int]float64)
-	criteriaMax := make(map[int]float64)
-	criteriaTime := make(map[int]float64)
-
-	for k, v := range body {
-		if strings.HasPrefix(k, "match_col_") {
-			idx, _ := strconv.Atoi(k[10:])
-			if arr := parseConditionInput(v); len(arr) > 0 {
-				criteriaMatch[idx] = arr
-			}
-		} else if strings.HasPrefix(k, "contains_col_") {
-			idx, _ := strconv.Atoi(k[13:])
-			if arr := parseConditionInput(v); len(arr) > 0 {
-				criteriaContains[idx] = arr
-			}
-		} else if strings.HasPrefix(k, "min_col_") {
-			idx, _ := strconv.Atoi(k[8:])
-			if val, ok := toFloat(v); ok {
-				criteriaMin[idx] = val
-			}
-		} else if strings.HasPrefix(k, "max_col_") {
-			idx, _ := strconv.Atoi(k[8:])
-			if val, ok := toFloat(v); ok {
-				criteriaMax[idx] = val
-			}
-		} else if strings.HasPrefix(k, "last_hours_col_") {
-			idx, _ := strconv.Atoi(k[15:])
-			if val, ok := toFloat(v); ok {
-				criteriaTime[idx] = val
-			}
-		}
-	}
-
+	// 4. Phân tích tham số tìm kiếm
+	filters := parseFilterParams(body) // Dùng hàm chuẩn bên utils.go
+	
 	limit := 1000
 	if l, ok := body["limit"]; ok {
-		if val, ok := toFloat(l); ok && val > 0 {
-			limit = int(val)
+		if val, ok := toFloat(l); ok && val > 0 { limit = int(val) }
+	}
+
+	// Xác định các cột cần trả về (Projection)
+	var returnCols []int
+	if v, ok := body["return_cols"]; ok {
+		if arr, ok := v.([]interface{}); ok {
+			for _, item := range arr {
+				if val, ok := toFloat(item); ok { returnCols = append(returnCols, int(val)) }
+			}
 		}
 	}
 
-	result := make(map[int]map[string]interface{})
-	count := 0
-
-	// 🔥 GLOBAL LOCK
-	STATE.SheetMutex.RLock()
-	defer STATE.SheetMutex.RUnlock()
-
+	// 5. Thực hiện tìm kiếm (Scan)
+	var results []map[string]interface{}
+	
+	STATE.SheetMutex.RLock() // Khóa đọc
 	rows := cacheData.RawValues
 	cleanRows := cacheData.CleanValues
-	now := time.Now().UnixMilli()
+	
+	for i, cleanRow := range cleanRows {
+		if len(results) >= limit { break }
 
-	for i, row := range rows {
-		if count >= limit {
-			break
-		}
-		match := true
-
-		// Match
-		for idx, arr := range criteriaMatch {
-			cellVal := ""
-			if idx < len(cleanRows[i]) {
-				cellVal = cleanRows[i][idx]
-			}
-			found := false
-			for _, target := range arr {
-				if target == cellVal {
-					found = true
-					break
+		// Sử dụng hàm so khớp chuẩn từ utils.go
+		if isRowMatched(cleanRow, rows[i], filters) {
+			
+			// Tạo object kết quả cho dòng này
+			item := make(map[string]interface{})
+			item["row_index"] = i + RANGES.DATA_START_ROW // Luôn trả về row_index chuẩn
+			
+			// Lấy dữ liệu các cột
+			rawRow := rows[i]
+			if len(returnCols) > 0 {
+				// Nếu chỉ yêu cầu một số cột nhất định
+				for _, colIdx := range returnCols {
+					if colIdx >= 0 && colIdx < len(rawRow) {
+						key := fmt.Sprintf("col_%d", colIdx)
+						item[key] = rawRow[colIdx]
+					}
+				}
+			} else {
+				// Lấy hết các cột (Mặc định)
+				for colIdx, val := range rawRow {
+					key := fmt.Sprintf("col_%d", colIdx)
+					item[key] = val
 				}
 			}
-			if !found {
-				match = false
-				break
-			}
+			
+			results = append(results, item)
 		}
-		if !match {
-			continue
-		}
-
-		// Contains
-		for idx, arr := range criteriaContains {
-			cellVal := ""
-			if idx < len(cleanRows[i]) {
-				cellVal = cleanRows[i][idx]
-			}
-			found := false
-			for _, target := range arr {
-				if strings.Contains(cellVal, target) {
-					found = true
-					break
-				}
-			}
-			if !found {
-				match = false
-				break
-			}
-		}
-		if !match {
-			continue
-		}
-
-		// Min
-		for idx, minVal := range criteriaMin {
-			if val, ok := getFloatVal(row, idx); !ok || val < minVal {
-				match = false
-				break
-			}
-		}
-		if !match {
-			continue
-		}
-
-		// Max
-		for idx, maxVal := range criteriaMax {
-			if val, ok := getFloatVal(row, idx); !ok || val > maxVal {
-				match = false
-				break
-			}
-		}
-		if !match {
-			continue
-		}
-
-		// Time
-		for idx, hours := range criteriaTime {
-			timeVal := int64(0)
-			if idx < len(row) {
-				timeVal = ConvertSerialDate(row[idx])
-			} // Dùng Utils
-			if timeVal == 0 {
-				match = false
-				break
-			}
-			if float64(now-timeVal)/3600000.0 > hours {
-				match = false
-				break
-			}
-		}
-		if !match {
-			continue
-		}
-
-		item := make(map[string]interface{})
-		item["row_index"] = i + RANGES.DATA_START_ROW
-		result[count] = item
-		count++
 	}
+	STATE.SheetMutex.RUnlock() // Mở khóa ngay sau khi quét xong
 
-	if count == 0 {
-		json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": "Không tìm thấy dữ liệu"})
+	// 6. Trả về kết quả
+	if len(results) == 0 {
+		json.NewEncoder(w).Encode(SearchResponse{
+			Status: "false", Messenger: "Không tìm thấy dữ liệu", Count: 0, Data: []map[string]interface{}{},
+		})
 	} else {
-		json.NewEncoder(w).Encode(map[string]interface{}{"status": "true", "messenger": "Thành công", "data": result})
+		json.NewEncoder(w).Encode(SearchResponse{
+			Status: "true", Messenger: "Thành công", Count: len(results), Data: results,
+		})
 	}
-}
-
-func parseConditionInput(v interface{}) []string {
-	if s, ok := v.(string); ok {
-		return []string{CleanString(s)}
-	}
-	if arr, ok := v.([]interface{}); ok {
-		res := []string{}
-		for _, item := range arr {
-			res = append(res, CleanString(item))
-		}
-		return res
-	}
-	return []string{}
 }
