@@ -6,22 +6,39 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/text/unicode/norm" // 🔥 THƯ VIỆN CHUẨN HÓA UNICODE
 )
 
-// --- Helper Functions ---
+// =================================================================================================
+// 🟢 1. CÁC HÀM TIỆN ÍCH CƠ BẢN (HELPER FUNCTIONS)
+// =================================================================================================
 
+// CleanString: Chuẩn hóa dữ liệu về dạng chuỗi viết thường, cắt khoảng trắng VÀ CHUẨN HÓA NFC.
+// Giống hệt logic .normalize('NFC') bên Node.js để xử lý lỗi tiếng Việt.
 func CleanString(v interface{}) string {
 	if v == nil { return "" }
+	// Nếu là số float64, ép kiểu giữ nguyên
 	if f, ok := v.(float64); ok { return strings.TrimSpace(strconv.FormatFloat(f, 'f', -1, 64)) }
-	return strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", v)))
+	
+	// Ép về string, trim space, lowercase
+	s := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", v)))
+	
+	// 🔥 QUAN TRỌNG: Chuẩn hóa NFC (Để "đang chạy" trên Sheet khớp với "đang chạy" trong Config)
+	return norm.NFC.String(s)
 }
 
+// SafeString: Giống CleanString nhưng GIỮ NGUYÊN HOA THƯỜNG (Cũng cần NFC)
 func SafeString(v interface{}) string {
 	if v == nil { return "" }
 	if f, ok := v.(float64); ok { return strings.TrimSpace(strconv.FormatFloat(f, 'f', -1, 64)) }
-	return strings.TrimSpace(fmt.Sprintf("%v", v))
+	
+	s := strings.TrimSpace(fmt.Sprintf("%v", v))
+	// 🔥 Chuẩn hóa NFC cho cả Note và Password để tránh lỗi ký tự lạ
+	return norm.NFC.String(s)
 }
 
+// toFloat: Cố gắng chuyển mọi kiểu dữ liệu về float64
 func toFloat(v interface{}) (float64, bool) {
 	if f, ok := v.(float64); ok { return f, true }
 	if s, ok := v.(string); ok {
@@ -30,11 +47,13 @@ func toFloat(v interface{}) (float64, bool) {
 	return 0, false
 }
 
+// getFloatVal: Lấy giá trị số tại cột cụ thể
 func getFloatVal(row []interface{}, idx int) (float64, bool) {
 	if idx < 0 || idx >= len(row) { return 0, false }
 	return toFloat(row[idx])
 }
 
+// ToSlice: Chuyển input thành mảng String
 func ToSlice(v interface{}) []string {
 	if v == nil { return []string{} }
 	if arr, ok := v.([]interface{}); ok {
@@ -47,6 +66,7 @@ func ToSlice(v interface{}) []string {
 	return []string{}
 }
 
+// ConvertSerialDate: Chuyển đổi ngày tháng
 func ConvertSerialDate(v interface{}) int64 {
 	s := fmt.Sprintf("%v", v)
 	if strings.Contains(s, "/") {
@@ -64,7 +84,9 @@ func ConvertSerialDate(v interface{}) int64 {
 	return 0
 }
 
-// --- Filter Logic ---
+// =================================================================================================
+// 🔥 2. BỘ MÁY LỌC (FILTER ENGINE)
+// =================================================================================================
 
 type CriteriaSet struct {
 	MatchCols    map[int][]string
@@ -118,10 +140,15 @@ func parseCriteriaSet(input interface{}) CriteriaSet {
 
 func parseFilterParams(body map[string]interface{}) FilterParams {
 	f := FilterParams{HasFilter: false}
-	// Parse trực tiếp từ root body
-	if v, ok := body["search_and"]; ok { f.AndCriteria = parseCriteriaSet(v) }
-	if v, ok := body["search_or"]; ok { f.OrCriteria = parseCriteriaSet(v) }
-	if !f.AndCriteria.IsEmpty || !f.OrCriteria.IsEmpty { f.HasFilter = true }
+	if v, ok := body["search_and"]; ok {
+		f.AndCriteria = parseCriteriaSet(v)
+	}
+	if v, ok := body["search_or"]; ok {
+		f.OrCriteria = parseCriteriaSet(v)
+	}
+	if !f.AndCriteria.IsEmpty || !f.OrCriteria.IsEmpty {
+		f.HasFilter = true
+	}
 	return f
 }
 
@@ -129,7 +156,6 @@ func checkCriteriaMatch(cleanRow []string, rawRow []interface{}, c CriteriaSet, 
 	if c.IsEmpty { return true }
 	
 	processResult := func(isMatch bool) (bool, bool) {
-		// AND: Chỉ cần 1 cái sai -> False. OR: Chỉ cần 1 cái đúng -> True.
 		if modeMatchAll { if !isMatch { return false, true } } else { if isMatch { return true, true } }
 		return false, false
 	}
@@ -140,6 +166,7 @@ func checkCriteriaMatch(cleanRow []string, rawRow []interface{}, c CriteriaSet, 
 		for _, t := range targets { if t == cellVal { match = true; break } }
 		if res, stop := processResult(match); stop { return res }
 	}
+
 	for idx, targets := range c.ContainsCols {
 		cellVal := ""; if idx < len(cleanRow) { cellVal = cleanRow[idx] }
 		match := false
@@ -148,6 +175,7 @@ func checkCriteriaMatch(cleanRow []string, rawRow []interface{}, c CriteriaSet, 
 		}
 		if res, stop := processResult(match); stop { return res }
 	}
+
 	for idx, minVal := range c.MinCols {
 		val, ok := getFloatVal(rawRow, idx); match := ok && val >= minVal
 		if res, stop := processResult(match); stop { return res }
@@ -167,7 +195,6 @@ func checkCriteriaMatch(cleanRow []string, rawRow []interface{}, c CriteriaSet, 
 }
 
 func isRowMatched(cleanRow []string, rawRow []interface{}, f FilterParams) bool {
-	// Logic: (Thỏa mãn hết AND) VÀ (Thỏa mãn ít nhất 1 OR nếu có)
 	if !f.AndCriteria.IsEmpty {
 		if !checkCriteriaMatch(cleanRow, rawRow, f.AndCriteria, true) { return false }
 	}
@@ -177,15 +204,20 @@ func isRowMatched(cleanRow []string, rawRow []interface{}, f FilterParams) bool 
 	return true
 }
 
-// --- Quality Check ---
+// =================================================================================================
+// 🟢 3. QUALITY CHECK
+// =================================================================================================
 
 type QualityResult struct { Valid bool; SystemEmail string; Missing string }
+
 func KiemTraChatLuongClean(cleanRow []string, action string) QualityResult {
 	if len(cleanRow) <= INDEX_DATA_TIKTOK.EMAIL { return QualityResult{false, "", "data_length"} }
 	rawEmail := cleanRow[INDEX_DATA_TIKTOK.EMAIL]
 	sysEmail := ""
 	if strings.Contains(rawEmail, "@") { parts := strings.Split(rawEmail, "@"); if len(parts) > 1 { sysEmail = parts[1] } }
 	
+	if action == "view_only" { return QualityResult{true, sysEmail, ""} }
+
 	hasEmail := (rawEmail != "")
 	hasUser := (cleanRow[INDEX_DATA_TIKTOK.USER_NAME] != "")
 	hasPass := (cleanRow[INDEX_DATA_TIKTOK.PASSWORD] != "")
@@ -194,7 +226,6 @@ func KiemTraChatLuongClean(cleanRow []string, action string) QualityResult {
 		if hasEmail { return QualityResult{true, sysEmail, ""} }
 		return QualityResult{false, "", "email"}
 	}
-	// Login và Auto yêu cầu (User hoặc Email) + Pass
 	if strings.Contains(action, "login") || strings.Contains(action, "auto") {
 		if (hasEmail || hasUser) && hasPass { return QualityResult{true, sysEmail, ""} }
 		return QualityResult{false, "", "user/pass"}
@@ -202,7 +233,9 @@ func KiemTraChatLuongClean(cleanRow []string, action string) QualityResult {
 	return QualityResult{false, "", "unknown"}
 }
 
-// --- Profiles ---
+// =================================================================================================
+// 🟢 4. PROFILES
+// =================================================================================================
 
 type AuthProfile struct { Status string `json:"status"`; Note string `json:"note"`; DeviceId string `json:"device_id"`; UserId string `json:"user_id"`; UserSec string `json:"user_sec"`; UserName string `json:"user_name"`; Email string `json:"email"`; NickName string `json:"nick_name"`; Password string `json:"password"`; PasswordEmail string `json:"password_email"`; RecoveryEmail string `json:"recovery_email"`; TwoFa string `json:"two_fa"`; Phone string `json:"phone"`; Birthday string `json:"birthday"`; ClientId string `json:"client_id"`; RefreshToken string `json:"refresh_token"`; AccessToken string `json:"access_token"`; Cookie string `json:"cookie"`; UserAgent string `json:"user_agent"`; Proxy string `json:"proxy"`; ProxyExpired string `json:"proxy_expired"`; CreateCountry string `json:"create_country"`; CreateTime string `json:"create_time"` }
 type ActivityProfile struct { StatusPost string `json:"status_post"`; DailyPostLimit string `json:"daily_post_limit"`; TodayPostCount string `json:"today_post_count"`; DailyFollowLimit string `json:"daily_follow_limit"`; TodayFollowCount string `json:"today_follow_count"`; LastActiveDate string `json:"last_active_date"`; FollowerCount string `json:"follower_count"`; FollowingCount string `json:"following_count"`; LikesCount string `json:"likes_count"`; VideoCount string `json:"video_count"`; StatusLive string `json:"status_live"`; LivePhoneAccess string `json:"live_phone_access"`; LiveStudioAccess string `json:"live_studio_access"`; LiveKey string `json:"live_key"`; LastLiveDuration string `json:"last_live_duration"`; ShopRole string `json:"shop_role"`; ShopId string `json:"shop_id"`; ProductCount string `json:"product_count"`; ShopHealth string `json:"shop_health"`; TotalOrders string `json:"total_orders"`; TotalRevenue string `json:"total_revenue"`; CommissionRate string `json:"commission_rate"` }
