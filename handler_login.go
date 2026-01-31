@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv" // 🔥 ĐÃ THÊM THƯ VIỆN NÀY ĐỂ FIX LỖI BUILD
 	"strings"
 	"time"
 )
@@ -18,7 +19,7 @@ type LoginResponse struct {
 	AuthProfile     AuthProfile     `json:"auth_profile"`
 	ActivityProfile ActivityProfile `json:"activity_profile"`
 	AiProfile       AiProfile       `json:"ai_profile"`
-	DebugLog        string          `json:"debug_log,omitempty"` // 🔥 Thêm trường này để soi lỗi
+	DebugLog        string          `json:"debug_log,omitempty"`
 }
 
 type PriorityStep struct {
@@ -51,7 +52,6 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
-		// 🔥 TRẢ VỀ LỖI KÈM DEBUG LOG
 		json.NewEncoder(w).Encode(map[string]string{
 			"status":    "false",
 			"messenger": err.Error(),
@@ -69,7 +69,7 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	STATE.SheetMutex.RLock()
 	rawLen := len(cacheData.RawValues)
 
-	// 🔥 BIẾN GHI LOG (Dùng để điều tra)
+	// Biến ghi log debug
 	var traceLog []string
 	addLog := func(msg string) { traceLog = append(traceLog, msg) }
 
@@ -97,7 +97,6 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 
 	for _, step := range steps {
 		indices := cacheData.StatusMap[step.Status]
-		// Chỉ log nếu tìm thấy nhóm trạng thái này
 		if len(indices) > 0 {
 			addLog(fmt.Sprintf("Step '%s' (Prio %d): Found %d rows", step.Status, step.PrioID, len(indices)))
 		}
@@ -106,7 +105,7 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 			if idx < rawLen {
 				row := cacheData.CleanValues[idx]
 				
-				// 🔥 LOG CHI TIẾT CHO DÒNG 14 (Index 3)
+				// Debug cho dòng 14 (Index 3)
 				if idx == 3 { 
 					addLog(fmt.Sprintf("--> CHECK ROW 14: Dev='%s' vs Req='%s'", row[INDEX_DATA_TIKTOK.DEVICE_ID], deviceId))
 				}
@@ -154,8 +153,7 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 		completedIndices := cacheData.StatusMap[STATUS_READ.COMPLETED]
 		for _, idx := range completedIndices {
 			if idx < rawLen && cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] == deviceId {
-				STATE.SheetMutex.RUnlock() 
-				// 🔥 TRẢ VỀ LỖI KÈM LOG DEBUG
+				STATE.SheetMutex.RUnlock()
 				return nil, fmt.Errorf("Các tài khoản đã hoàn thành. [DEBUG: %s]", strings.Join(traceLog, " | "))
 			}
 		}
@@ -165,7 +163,6 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	return nil, fmt.Errorf("Không còn tài khoản phù hợp. [DEBUG: %s]", strings.Join(traceLog, " | "))
 }
 
-// ... (Giữ nguyên các hàm helper phía dưới như buildPrioritySteps, commit_and_response...) ...
 func buildPrioritySteps(action string) []PriorityStep {
 	steps := make([]PriorityStep, 0, 10)
 	add := func(st string, my, empty bool, prio int) {
@@ -277,6 +274,7 @@ func parseUpdateDataLogin(body map[string]interface{}) map[int]interface{} {
 			for k, val := range updatedMap {
 				if strings.HasPrefix(k, "col_") {
 					if idxStr := strings.TrimPrefix(k, "col_"); idxStr != "" {
+						// 🔥 CẦN strconv ĐỂ CHẠY HÀM Atoi NÀY
 						if idx, err := strconv.Atoi(idxStr); err == nil {
 							cols[idx] = val
 						}
