@@ -302,7 +302,7 @@ func applyUpdateToRow(cache *SheetCacheData, idx int, updateCols map[int]interfa
 			if oldDev != "" { 
 				delete(cache.AssignedMap, oldDev) 
 			} else { 
-				// ⚠️ Dùng hàm removeFromIntList (Có trong utils.go, vì cùng package main nên gọi được)
+				// ⚠️ Dùng hàm removeFromIntList (Có trong handler_login.go, vì cùng package main nên gọi được)
 				removeFromIntList(cache.UnassignedList, idx) 
 			}
 			// Thêm vào vị trí mới
@@ -349,3 +349,8 @@ func tao_ghi_chu_chuan_update(oldNote, content, newStatus string) string {
 
 	return fmt.Sprintf("%s\n%s (Lần %d)", statusToUse, nowFull, count)
 }
+
+// ⚠️ Lưu ý: Hàm removeFromIntList đã được xóa ở file này để tránh lỗi redeclared.
+// Code sẽ tự động sử dụng hàm removeFromIntList từ file handler_login.go.
+// Đảm bảo file handler_login.go có hàm này:
+// func removeFromIntList(list []int, target int) []int { ... }
