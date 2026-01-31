@@ -18,6 +18,11 @@ import (
 // Regex xóa ký tự ẩn (Non-breaking space, Zero-width space...)
 var REGEX_INVISIBLE = regexp.MustCompile(`[\x{00A0}\x{200B}\x{200C}\x{200D}\x{FEFF}]`)
 
+// Regex nhận diện ngày tháng: dd/mm/yyyy & Regex nhận diện số lần chạy trong ghi chú: (Lần 5)
+var (
+	REGEX_DATE = regexp.MustCompile(`(\d{1,2}\/\d{1,2}\/\d{4})`)
+	REGEX_COUNT = regexp.MustCompile(`\(Lần\s*(\d+)\)`)
+)
 // ⚠️ LƯU Ý: REGEX_DATE và REGEX_COUNT sử dụng từ config.go để tránh lỗi redeclared
 
 // Làm sạch chuỗi: Chuyển về chữ thường, chuẩn hóa Unicode NFC, xóa ký tự ẩn
