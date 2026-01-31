@@ -16,13 +16,11 @@ import (
 // =================================================================================================
 
 // Regex xóa ký tự ẩn (Non-breaking space, Zero-width space...)
+// Biến này chỉ dùng nội bộ trong utils nên giữ lại ở đây
 var REGEX_INVISIBLE = regexp.MustCompile(`[\x{00A0}\x{200B}\x{200C}\x{200D}\x{FEFF}]`)
 
-// Regex dùng chung để bắt ngày tháng và số lần chạy
-var (
-	REGEX_DATE  = regexp.MustCompile(`(\d{1,2}\/\d{1,2}\/\d{4})`)
-	REGEX_COUNT = regexp.MustCompile(`\(Lần\s*(\d+)\)`)
-)
+// ⚠️ LƯU Ý: REGEX_DATE và REGEX_COUNT đã được xóa khỏi file này
+// Hệ thống sẽ tự động sử dụng biến đã khai báo bên file config.go
 
 // Làm sạch chuỗi: Chuyển về chữ thường, chuẩn hóa Unicode NFC, xóa ký tự ẩn
 func CleanString(v interface{}) string {
@@ -95,7 +93,8 @@ func ConvertSerialDate(v interface{}) int64 {
 }
 
 // =================================================================================================
-// 🟢 2. CÁC HÀM QUẢN LÝ MAP/LIST DÙNG CHUNG (Tránh lỗi redeclared)
+// 🟢 2. CÁC HÀM QUẢN LÝ MAP/LIST DÙNG CHUNG
+// (Đặt ở đây để handler_login và handler_update cùng gọi được)
 // =================================================================================================
 
 // Xóa một chỉ số dòng (targetIdx) khỏi StatusMap
