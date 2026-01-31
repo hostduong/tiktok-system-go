@@ -2,10 +2,6 @@ package main
 
 import "regexp"
 
-// =================================================================================================
-// 🟢 CẤU HÌNH GOOGLE SHEETS & HỆ THỐNG
-// =================================================================================================
-
 const (
 	SPREADSHEET_ID_MASTER = "1r71kCCd9plRqXIWKQ2-GMUp-UXH21ISmBOObbQxMZVs"
 	KEY_SEPARATOR         = "__"
@@ -24,16 +20,6 @@ var SHEET_NAMES = struct {
 	POST_LOGGER:  "PostLogger",
 	ERROR_LOGGER: "ErrorLogger",
 }
-
-var TEMPLATE_SHEETS = map[string]string{
-	"DataTiktok":  "Mẫu DataTiktok",
-	"EmailLogger": "Mẫu EmailLogger",
-	"PostLogger":  "Mẫu PostLogger",
-}
-
-// =================================================================================================
-// 🟢 CẤU HÌNH PHẠM VI DỮ LIỆU (RANGES)
-// =================================================================================================
 
 var RANGES = struct {
 	DATA_START_ROW       int
@@ -64,7 +50,7 @@ var CACHE = struct {
 	TOKEN_TTL_MS    int64
 	CLEAN_COL_LIMIT int
 }{
-	SHEET_VALID_MS:  300000, // 5 phút
+	SHEET_VALID_MS:  300000,
 	SHEET_ERROR_MS:  60000,
 	SHEET_MAX_KEYS:  50,
 	TOKEN_MAX_KEYS:  5000,
@@ -97,10 +83,7 @@ var QUEUE = struct {
 	BATCH_LIMIT_BASE:  500,
 }
 
-// =================================================================================================
-// 🟢 BẢN ĐỒ CHỈ MỤC CỘT (INDEX MAPPING)
-// =================================================================================================
-
+// 🔥 CẤU HÌNH INDEX: STATUS LÀ CỘT A (INDEX 0)
 var INDEX_DATA_TIKTOK = struct {
 	STATUS int; NOTE int; DEVICE_ID int; USER_ID int; USER_SEC int; USER_NAME int; EMAIL int;
 	NICK_NAME int; PASSWORD int; PASSWORD_EMAIL int; RECOVERY_EMAIL int; TWO_FA int;
@@ -118,14 +101,7 @@ var INDEX_DATA_TIKTOK = struct {
 	WRITING_STYLE int; MAIN_GOAL int; DEFAULT_CTA int; CONTENT_LENGTH int; CONTENT_TYPE int;
 	TARGET_AUDIENCE int; VISUAL_STYLE int; AI_PERSONA int; BANNED_KEYWORDS int; CONTENT_LANGUAGE int; COUNTRY int;
 }{
-	// 🔥 STATUS LÀ CỘT A -> INDEX 0 (GIỮ NGUYÊN THEO Ý BẠN)
-	STATUS: 0, 
-	NOTE: 1, 
-	DEVICE_ID: 2, 
-	USER_ID: 3, 
-	USER_SEC: 4, 
-	USER_NAME: 5, 
-	EMAIL: 6,
+	STATUS: 0, NOTE: 1, DEVICE_ID: 2, USER_ID: 3, USER_SEC: 4, USER_NAME: 5, EMAIL: 6,
 	NICK_NAME: 7, PASSWORD: 8, PASSWORD_EMAIL: 9, RECOVERY_EMAIL: 10, TWO_FA: 11,
 	
 	PHONE: 12, BIRTHDAY: 13, CLIENT_ID: 14, REFRESH_TOKEN: 15, ACCESS_TOKEN: 16,
@@ -142,11 +118,7 @@ var INDEX_DATA_TIKTOK = struct {
 	TARGET_AUDIENCE: 55, VISUAL_STYLE: 56, AI_PERSONA: 57, BANNED_KEYWORDS: 58, CONTENT_LANGUAGE: 59, COUNTRY: 60,
 }
 
-// =================================================================================================
-// 🟢 ĐỊNH NGHĨA TRẠNG THÁI (STATUS) - 🔥 QUAN TRỌNG: PHẢI SỬA KHÔNG DẤU
-// =================================================================================================
-
-// Trạng thái dùng để ĐỌC (SỬA THÀNH KHÔNG DẤU ĐỂ KHỚP VỚI LOG SERVER)
+// 🔥 CẤU HÌNH STATUS: CÓ DẤU (ĐÚNG NHƯ SHEET)
 var STATUS_READ = struct {
 	RUNNING     string
 	WAITING     string
@@ -156,16 +128,15 @@ var STATUS_READ = struct {
 	REGISTER    string
 	COMPLETED   string
 }{
-	RUNNING:     "dang chay",    // Log thấy "dang chay"
-	WAITING:     "dang cho",     // Log thấy "dang cho"
-	LOGIN:       "dang nhap",
-	REGISTERING: "dang dang ky",
-	WAIT_REG:    "cho dang ky",
-	REGISTER:    "dang ky",
-	COMPLETED:   "hoan thanh",
+	RUNNING:     "đang chạy",
+	WAITING:     "đang chờ",
+	LOGIN:       "đăng nhập",
+	REGISTERING: "đang đăng ký",
+	WAIT_REG:    "chờ đăng ký",
+	REGISTER:    "đăng ký",
+	COMPLETED:   "hoàn thành",
 }
 
-// Trạng thái dùng để GHI (Vẫn giữ có dấu để hiển thị đẹp trên Excel)
 var STATUS_WRITE = struct {
 	RUNNING     string
 	WAITING     string
