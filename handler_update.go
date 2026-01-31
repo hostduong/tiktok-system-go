@@ -312,16 +312,6 @@ func applyUpdateToRow(cache *SheetCacheData, idx int, updateCols map[int]interfa
 	cache.LastAccessed = time.Now().UnixMilli()
 }
 
-// Xóa phần tử khỏi danh sách Index
-func removeFromIntList(list *[]int, target int) {
-	for i, v := range *list {
-		if v == target {
-			*list = append((*list)[:i], (*list)[i+1:]...)
-			return
-		}
-	}
-}
-
 // Logic tạo Note Update: Dùng Regex để giữ nguyên số lần chạy cũ
 func tao_ghi_chu_chuan_update(oldNote, content, newStatus string) string {
 	nowFull := time.Now().Add(7 * time.Hour).Format("02/01/2006 15:04:05")
