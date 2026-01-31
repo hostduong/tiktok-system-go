@@ -9,32 +9,26 @@ import (
 )
 
 // =================================================================================================
-// 🟢 1. CÁC HÀM TIỆN ÍCH CƠ BẢN (CORE UTILS)
+// 🟢 1. CÁC HÀM TIỆN ÍCH CƠ BẢN
 // =================================================================================================
 
-// CleanString: Chuẩn hóa chuỗi để so sánh (Trim space + Lowercase)
-// 🔥 FIX QUAN TRỌNG: Xử lý số thực lớn (như User ID) để không bị lỗi e+18
+// CleanString: Chuẩn hóa chuỗi. QUAN TRỌNG: Xử lý số thực lớn (ID) để không bị lỗi e+18
 func CleanString(v interface{}) string {
 	if v == nil {
 		return ""
 	}
-
-	// Nếu là số thực (do Google Sheets trả về), ép kiểu về string đầy đủ
+	// Nếu là số thực (do Google Sheets trả về), ép kiểu về string đầy đủ, không dùng e+18
 	if f, ok := v.(float64); ok {
-		// 'f': định dạng thập phân, -1: tự động độ chính xác, 64: bit
 		return strings.TrimSpace(strconv.FormatFloat(f, 'f', -1, 64))
 	}
-
-	// Các trường hợp khác
 	return strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", v)))
 }
 
-// SafeString: Giữ nguyên hoa thường (dùng cho Note, Password...), chỉ Trim space
+// SafeString: Giữ nguyên hoa thường (Note, Password...), chỉ trim space
 func SafeString(v interface{}) string {
 	if v == nil {
 		return ""
 	}
-	// Cũng áp dụng fix số lớn cho chắc chắn
 	if f, ok := v.(float64); ok {
 		return strings.TrimSpace(strconv.FormatFloat(f, 'f', -1, 64))
 	}
@@ -60,15 +54,17 @@ func getFloatVal(row []interface{}, idx int) (float64, bool) {
 	return toFloat(row[idx])
 }
 
-// Wrapper để tương thích
 func GetFloatVal(row []interface{}, idx int) (float64, bool) {
 	return getFloatVal(row, idx)
 }
 
+// ToSlice: Chuyển mọi thứ thành Mảng String (Hỗ trợ logic OR trong cùng 1 field)
+// VD: "US" -> ["us"], ["US", "VN"] -> ["us", "vn"]
 func ToSlice(v interface{}) []string {
 	if v == nil {
 		return []string{}
 	}
+	// Nếu đã là mảng
 	if arr, ok := v.([]interface{}); ok {
 		res := make([]string, len(arr))
 		for i, item := range arr {
@@ -76,20 +72,16 @@ func ToSlice(v interface{}) []string {
 		}
 		return res
 	}
+	// Nếu là chuỗi đơn
 	s := CleanString(v)
 	if s != "" {
 		return []string{s}
-	}
-	// Xử lý trường hợp chuỗi rỗng nhưng vẫn muốn trả về mảng chứa chuỗi rỗng
-	if strVal, ok := v.(string); ok && strVal == "" {
-		return []string{""}
 	}
 	return []string{}
 }
 
 func ConvertSerialDate(v interface{}) int64 {
 	s := fmt.Sprintf("%v", v)
-	// Xử lý dạng chuỗi dd/mm/yyyy
 	if strings.Contains(s, "/") {
 		if t, err := time.ParseInLocation("02/01/2006 15:04:05", s, time.FixedZone("UTC+7", 7*3600)); err == nil {
 			return t.UnixMilli()
@@ -98,7 +90,6 @@ func ConvertSerialDate(v interface{}) int64 {
 			return t.UnixMilli()
 		}
 	}
-	// Xử lý dạng Serial Number của Excel
 	val := 0.0
 	if f, ok := v.(float64); ok {
 		val = f
@@ -115,7 +106,226 @@ func ConvertSerialDate(v interface{}) int64 {
 }
 
 // =================================================================================================
-// 🟢 2. CÁC HÀM KIỂM TRA CHẤT LƯỢNG NICK
+// 🔥 2. BỘ MÁY LỌC MỚI (NEW FILTER ENGINE) - LOGIC TRONG "SEARCH"
+// =================================================================================================
+
+type CriteriaSet struct {
+	MatchCols    map[int][]string
+	ContainsCols map[int][]string
+	MinCols      map[int]float64
+	MaxCols      map[int]float64
+	TimeCols     map[int]float64
+	IsEmpty      bool
+}
+
+type FilterParams struct {
+	AndCriteria CriteriaSet
+	OrCriteria  CriteriaSet
+	HasFilter   bool
+}
+
+// Parse các điều kiện trong 1 block (search root, search.and, search.or)
+func parseCriteriaSet(input interface{}) CriteriaSet {
+	c := CriteriaSet{
+		MatchCols:    make(map[int][]string), ContainsCols: make(map[int][]string),
+		MinCols:      make(map[int]float64), MaxCols:      make(map[int]float64), TimeCols:     make(map[int]float64),
+		IsEmpty:      true,
+	}
+	data, ok := input.(map[string]interface{})
+	if !ok {
+		return c
+	}
+
+	for k, v := range data {
+		if strings.HasPrefix(k, "match_col_") {
+			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "match_col_")); err == nil {
+				c.MatchCols[idx] = ToSlice(v)
+				c.IsEmpty = false
+			}
+		} else if strings.HasPrefix(k, "contains_col_") {
+			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "contains_col_")); err == nil {
+				c.ContainsCols[idx] = ToSlice(v)
+				c.IsEmpty = false
+			}
+		} else if strings.HasPrefix(k, "min_col_") {
+			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "min_col_")); err == nil {
+				if val, ok := toFloat(v); ok {
+					c.MinCols[idx] = val
+					c.IsEmpty = false
+				}
+			}
+		} else if strings.HasPrefix(k, "max_col_") {
+			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "max_col_")); err == nil {
+				if val, ok := toFloat(v); ok {
+					c.MaxCols[idx] = val
+					c.IsEmpty = false
+				}
+			}
+		} else if strings.HasPrefix(k, "last_hours_col_") {
+			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "last_hours_col_")); err == nil {
+				if val, ok := toFloat(v); ok {
+					c.TimeCols[idx] = val
+					c.IsEmpty = false
+				}
+			}
+		}
+	}
+	return c
+}
+
+// Hàm chính: Chỉ đọc filter NẾU có key "search" trong body
+func parseFilterParams(body map[string]interface{}) FilterParams {
+	f := FilterParams{HasFilter: false}
+
+	// 🔥 KEY CHANGE: Chỉ lấy dữ liệu trong object "search"
+	// Nếu không có "search", code sẽ tự động coi như HasFilter = false -> Chạy Auto
+	searchObj, ok := body["search"].(map[string]interface{})
+	if !ok || searchObj == nil {
+		return f
+	}
+
+	// 1. Parse Root của "search" (Mặc định là AND)
+	f.AndCriteria = parseCriteriaSet(searchObj)
+
+	// 2. Parse Nested "and" bên trong "search"
+	if v, ok := searchObj["and"]; ok {
+		subAnd := parseCriteriaSet(v)
+		if !subAnd.IsEmpty {
+			for k, v := range subAnd.MatchCols {
+				f.AndCriteria.MatchCols[k] = v
+			}
+			for k, v := range subAnd.ContainsCols {
+				f.AndCriteria.ContainsCols[k] = v
+			}
+			for k, v := range subAnd.MinCols {
+				f.AndCriteria.MinCols[k] = v
+			}
+			for k, v := range subAnd.MaxCols {
+				f.AndCriteria.MaxCols[k] = v
+			}
+			for k, v := range subAnd.TimeCols {
+				f.AndCriteria.TimeCols[k] = v
+			}
+			f.AndCriteria.IsEmpty = false
+		}
+	}
+
+	// 3. Parse Nested "or" bên trong "search"
+	if v, ok := searchObj["or"]; ok {
+		f.OrCriteria = parseCriteriaSet(v)
+	}
+
+	// Nếu có bất kỳ điều kiện nào -> Bật cờ lọc
+	if !f.AndCriteria.IsEmpty || !f.OrCriteria.IsEmpty {
+		f.HasFilter = true
+	}
+	return f
+}
+
+func checkCriteriaMatch(cleanRow []string, rawRow []interface{}, c CriteriaSet, modeMatchAll bool) bool {
+	if c.IsEmpty {
+		return true
+	}
+	processResult := func(isMatch bool) (bool, bool) {
+		if modeMatchAll {
+			if !isMatch {
+				return false, true
+			}
+		} else {
+			if isMatch {
+				return true, true
+			}
+		}
+		return false, false
+	}
+
+	for idx, targets := range c.MatchCols {
+		cellVal := ""
+		if idx < len(cleanRow) {
+			cellVal = cleanRow[idx]
+		}
+		match := false
+		for _, t := range targets {
+			if t == cellVal {
+				match = true
+				break
+			}
+		}
+		if res, stop := processResult(match); stop {
+			return res
+		}
+	}
+	for idx, targets := range c.ContainsCols {
+		cellVal := ""
+		if idx < len(cleanRow) {
+			cellVal = cleanRow[idx]
+		}
+		match := false
+		for _, t := range targets {
+			if t == "" {
+				if cellVal == "" {
+					match = true
+					break
+				}
+			} else {
+				if strings.Contains(cellVal, t) {
+					match = true
+					break
+				}
+			}
+		}
+		if res, stop := processResult(match); stop {
+			return res
+		}
+	}
+	for idx, minVal := range c.MinCols {
+		val, ok := getFloatVal(rawRow, idx)
+		match := ok && val >= minVal
+		if res, stop := processResult(match); stop {
+			return res
+		}
+	}
+	for idx, maxVal := range c.MaxCols {
+		val, ok := getFloatVal(rawRow, idx)
+		match := ok && val <= maxVal
+		if res, stop := processResult(match); stop {
+			return res
+		}
+	}
+	now := time.Now().UnixMilli()
+	for idx, hours := range c.TimeCols {
+		timeVal := int64(0)
+		if idx < len(rawRow) {
+			timeVal = ConvertSerialDate(rawRow[idx])
+		}
+		match := timeVal > 0 && (float64(now-timeVal)/3600000.0 <= hours)
+		if res, stop := processResult(match); stop {
+			return res
+		}
+	}
+	if modeMatchAll {
+		return true
+	} else {
+		return false
+	}
+}
+
+func isRowMatched(cleanRow []string, rawRow []interface{}, f FilterParams) bool {
+	if !f.AndCriteria.IsEmpty {
+		if !checkCriteriaMatch(cleanRow, rawRow, f.AndCriteria, true) {
+			return false
+		}
+	}
+	if !f.OrCriteria.IsEmpty {
+		if !checkCriteriaMatch(cleanRow, rawRow, f.OrCriteria, false) {
+			return false
+		}
+	}
+	return true
+}
+
+// =================================================================================================
+// 🟢 3. CÁC HÀM KIỂM TRA CHẤT LƯỢNG NICK
 // =================================================================================================
 
 type QualityResult struct {
@@ -166,216 +376,33 @@ func KiemTraChatLuongClean(cleanRow []string, action string) QualityResult {
 }
 
 // =================================================================================================
-// 🔥 3. BỘ MÁY LỌC (FILTER ENGINE) - DÙNG CHUNG CHO TOÀN BỘ APP
-// =================================================================================================
-
-type CriteriaSet struct {
-	MatchCols    map[int][]string
-	ContainsCols map[int][]string
-	MinCols      map[int]float64
-	MaxCols      map[int]float64
-	TimeCols     map[int]float64
-	IsEmpty      bool
-}
-
-type FilterParams struct {
-	AndCriteria CriteriaSet
-	OrCriteria  CriteriaSet
-	HasFilter   bool
-}
-
-func parseCriteriaSet(input interface{}) CriteriaSet {
-	c := CriteriaSet{
-		MatchCols:    make(map[int][]string),
-		ContainsCols: make(map[int][]string),
-		MinCols:      make(map[int]float64),
-		MaxCols:      make(map[int]float64),
-		TimeCols:     make(map[int]float64),
-		IsEmpty:      true,
-	}
-	data, ok := input.(map[string]interface{})
-	if !ok {
-		return c
-	}
-
-	for k, v := range data {
-		if strings.HasPrefix(k, "match_col_") {
-			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "match_col_")); err == nil {
-				c.MatchCols[idx] = ToSlice(v)
-				c.IsEmpty = false
-			}
-		} else if strings.HasPrefix(k, "contains_col_") {
-			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "contains_col_")); err == nil {
-				c.ContainsCols[idx] = ToSlice(v)
-				c.IsEmpty = false
-			}
-		} else if strings.HasPrefix(k, "min_col_") {
-			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "min_col_")); err == nil {
-				if val, ok := toFloat(v); ok {
-					c.MinCols[idx] = val
-					c.IsEmpty = false
-				}
-			}
-		} else if strings.HasPrefix(k, "max_col_") {
-			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "max_col_")); err == nil {
-				if val, ok := toFloat(v); ok {
-					c.MaxCols[idx] = val
-					c.IsEmpty = false
-				}
-			}
-		} else if strings.HasPrefix(k, "last_hours_col_") {
-			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "last_hours_col_")); err == nil {
-				if val, ok := toFloat(v); ok {
-					c.TimeCols[idx] = val
-					c.IsEmpty = false
-				}
-			}
-		}
-	}
-	return c
-}
-
-func parseFilterParams(body map[string]interface{}) FilterParams {
-	f := FilterParams{HasFilter: false}
-	
-	// Parse Root Level (Mặc định là AND)
-	f.AndCriteria = parseCriteriaSet(body)
-	
-	// Parse Nested AND
-	if v, ok := body["and"]; ok {
-		subAnd := parseCriteriaSet(v)
-		if !subAnd.IsEmpty {
-			for k, v := range subAnd.MatchCols { f.AndCriteria.MatchCols[k] = v }
-			for k, v := range subAnd.ContainsCols { f.AndCriteria.ContainsCols[k] = v }
-			for k, v := range subAnd.MinCols { f.AndCriteria.MinCols[k] = v }
-			for k, v := range subAnd.MaxCols { f.AndCriteria.MaxCols[k] = v }
-			for k, v := range subAnd.TimeCols { f.AndCriteria.TimeCols[k] = v }
-			f.AndCriteria.IsEmpty = false
-		}
-	}
-	
-	// Parse Nested OR
-	if v, ok := body["or"]; ok {
-		f.OrCriteria = parseCriteriaSet(v)
-	}
-	
-	if !f.AndCriteria.IsEmpty || !f.OrCriteria.IsEmpty {
-		f.HasFilter = true
-	}
-	return f
-}
-
-func checkCriteriaMatch(cleanRow []string, rawRow []interface{}, c CriteriaSet, modeMatchAll bool) bool {
-	if c.IsEmpty {
-		return true
-	}
-	processResult := func(isMatch bool) (bool, bool) {
-		if modeMatchAll {
-			if !isMatch { return false, true } // AND: Sai là Dừng
-		} else {
-			if isMatch { return true, true } // OR: Đúng là Dừng
-		}
-		return false, false
-	}
-
-	for idx, targets := range c.MatchCols {
-		cellVal := ""
-		if idx < len(cleanRow) { cellVal = cleanRow[idx] }
-		match := false
-		for _, t := range targets {
-			if t == cellVal {
-				match = true
-				break
-			}
-		}
-		if res, stop := processResult(match); stop { return res }
-	}
-
-	for idx, targets := range c.ContainsCols {
-		cellVal := ""
-		if idx < len(cleanRow) { cellVal = cleanRow[idx] }
-		match := false
-		for _, t := range targets {
-			if t == "" {
-				if cellVal == "" { match = true; break }
-			} else {
-				if strings.Contains(cellVal, t) { match = true; break }
-			}
-		}
-		if res, stop := processResult(match); stop { return res }
-	}
-
-	for idx, minVal := range c.MinCols {
-		val, ok := getFloatVal(rawRow, idx)
-		match := ok && val >= minVal
-		if res, stop := processResult(match); stop { return res }
-	}
-
-	for idx, maxVal := range c.MaxCols {
-		val, ok := getFloatVal(rawRow, idx)
-		match := ok && val <= maxVal
-		if res, stop := processResult(match); stop { return res }
-	}
-
-	now := time.Now().UnixMilli()
-	for idx, hours := range c.TimeCols {
-		timeVal := int64(0)
-		if idx < len(rawRow) { timeVal = ConvertSerialDate(rawRow[idx]) }
-		match := timeVal > 0 && (float64(now-timeVal)/3600000.0 <= hours)
-		if res, stop := processResult(match); stop { return res }
-	}
-
-	if modeMatchAll {
-		return true // AND: Hết vòng lặp mà không sai -> Đúng
-	} else {
-		return false // OR: Hết vòng lặp mà không đúng -> Sai
-	}
-}
-
-func isRowMatched(cleanRow []string, rawRow []interface{}, f FilterParams) bool {
-	// 1. Kiểm tra AND
-	if !f.AndCriteria.IsEmpty {
-		if !checkCriteriaMatch(cleanRow, rawRow, f.AndCriteria, true) {
-			return false
-		}
-	}
-	// 2. Kiểm tra OR
-	if !f.OrCriteria.IsEmpty {
-		if !checkCriteriaMatch(cleanRow, rawRow, f.OrCriteria, false) {
-			return false
-		}
-	}
-	return true
-}
-
-// =================================================================================================
-// 🟢 4. PROFILE MAKERS & HELPERS (STRUCTS)
+// 🟢 4. PROFILE STRUCTS & HELPERS
 // =================================================================================================
 
 type AuthProfile struct {
-	Status         string `json:"status"`
-	Note           string `json:"note"`
-	DeviceId       string `json:"device_id"`
-	UserId         string `json:"user_id"`
-	UserSec        string `json:"user_sec"`
-	UserName       string `json:"user_name"`
-	Email          string `json:"email"`
-	NickName       string `json:"nick_name"`
-	Password       string `json:"password"`
-	PasswordEmail  string `json:"password_email"`
-	RecoveryEmail  string `json:"recovery_email"`
-	TwoFa          string `json:"two_fa"`
-	Phone          string `json:"phone"`
-	Birthday       string `json:"birthday"`
-	ClientId       string `json:"client_id"`
-	RefreshToken   string `json:"refresh_token"`
-	AccessToken    string `json:"access_token"`
-	Cookie         string `json:"cookie"`
-	UserAgent      string `json:"user_agent"`
-	Proxy          string `json:"proxy"`
-	ProxyExpired   string `json:"proxy_expired"`
-	CreateCountry  string `json:"create_country"`
-	CreateTime     string `json:"create_time"`
+	Status        string `json:"status"`
+	Note          string `json:"note"`
+	DeviceId      string `json:"device_id"`
+	UserId        string `json:"user_id"`
+	UserSec       string `json:"user_sec"`
+	UserName      string `json:"user_name"`
+	Email         string `json:"email"`
+	NickName      string `json:"nick_name"`
+	Password      string `json:"password"`
+	PasswordEmail string `json:"password_email"`
+	RecoveryEmail string `json:"recovery_email"`
+	TwoFa         string `json:"two_fa"`
+	Phone         string `json:"phone"`
+	Birthday      string `json:"birthday"`
+	ClientId      string `json:"client_id"`
+	RefreshToken  string `json:"refresh_token"`
+	AccessToken   string `json:"access_token"`
+	Cookie        string `json:"cookie"`
+	UserAgent     string `json:"user_agent"`
+	Proxy         string `json:"proxy"`
+	ProxyExpired  string `json:"proxy_expired"`
+	CreateCountry string `json:"create_country"`
+	CreateTime    string `json:"create_time"`
 }
 
 type ActivityProfile struct {
@@ -505,7 +532,6 @@ func MakeAiProfile(row []interface{}) AiProfile {
 	}
 }
 
-// Hàm hỗ trợ xóa phần tử khỏi Status Map (Dùng chung cho cả Login và Update)
 func removeFromStatusMap(m map[string][]int, status string, targetIdx int) {
 	if list, ok := m[status]; ok {
 		for i, v := range list {
