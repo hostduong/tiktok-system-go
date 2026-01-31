@@ -11,22 +11,32 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// ... (Giữ nguyên các hàm CleanString, SafeString, toFloat, getFloatVal, ToSlice, ConvertSerialDate từ trước) ...
+// Regex xóa ký tự ẩn (Non-breaking space, Zero-width space...)
 var REGEX_INVISIBLE = regexp.MustCompile(`[\x{00A0}\x{200B}\x{200C}\x{200D}\x{FEFF}]`)
 
 func CleanString(v interface{}) string {
 	if v == nil { return "" }
 	if f, ok := v.(float64); ok { return strings.TrimSpace(strconv.FormatFloat(f, 'f', -1, 64)) }
+	
+	// 1. Chuyển về string, viết thường
 	s := strings.ToLower(fmt.Sprintf("%v", v))
+	
+	// 2. Chuẩn hóa Unicode NFC (Gộp dấu tiếng Việt)
 	s = norm.NFC.String(s)
+	
+	// 3. Xóa ký tự ẩn
 	s = strings.ReplaceAll(s, "\u00A0", " ")
 	s = REGEX_INVISIBLE.ReplaceAllString(s, "")
+	
+	// 4. Trim
 	return strings.TrimSpace(s)
 }
 
 func SafeString(v interface{}) string {
 	if v == nil { return "" }
 	if f, ok := v.(float64); ok { return strings.TrimSpace(strconv.FormatFloat(f, 'f', -1, 64)) }
+	
+	// Giữ nguyên hoa thường, chỉ chuẩn hóa dấu và ký tự ẩn
 	s := fmt.Sprintf("%v", v)
 	s = norm.NFC.String(s)
 	s = strings.ReplaceAll(s, "\u00A0", " ")
@@ -34,6 +44,7 @@ func SafeString(v interface{}) string {
 	return strings.TrimSpace(s)
 }
 
+// ... (Giữ nguyên các hàm toFloat, getFloatVal, ToSlice, ConvertSerialDate) ...
 func toFloat(v interface{}) (float64, bool) {
 	if f, ok := v.(float64); ok { return f, true }
 	if s, ok := v.(string); ok {
@@ -76,9 +87,7 @@ func ConvertSerialDate(v interface{}) int64 {
 	return 0
 }
 
-// =================================================================================================
-// 🔥 2. BỘ MÁY LỌC (FILTER ENGINE) - ĐÃ FIX LỖI ZERO VALUE
-// =================================================================================================
+// --- FILTER LOGIC (Đã tối ưu để tránh lỗi Zero Value) ---
 
 type CriteriaSet struct {
 	MatchCols    map[int][]string
@@ -95,7 +104,6 @@ type FilterParams struct {
 	HasFilter   bool
 }
 
-// Hàm khởi tạo CriteriaSet rỗng chuẩn (IsEmpty = true)
 func NewCriteriaSet() CriteriaSet {
 	return CriteriaSet{
 		MatchCols:    make(map[int][]string),
@@ -103,12 +111,12 @@ func NewCriteriaSet() CriteriaSet {
 		MinCols:      make(map[int]float64),
 		MaxCols:      make(map[int]float64),
 		TimeCols:     make(map[int]float64),
-		IsEmpty:      true, // 🔥 QUAN TRỌNG: Mặc định là Rỗng
+		IsEmpty:      true, // Mặc định là Rỗng
 	}
 }
 
 func parseCriteriaSet(input interface{}) CriteriaSet {
-	c := NewCriteriaSet() // Sử dụng hàm khởi tạo chuẩn
+	c := NewCriteriaSet()
 	data, ok := input.(map[string]interface{})
 	if !ok { return c }
 
@@ -116,12 +124,17 @@ func parseCriteriaSet(input interface{}) CriteriaSet {
 		if strings.HasPrefix(k, "match_col_") {
 			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "match_col_")); err == nil {
 				vals := ToSlice(v)
-				if len(vals) > 0 { c.MatchCols[idx] = vals; c.IsEmpty = false }
+				// Chỉ thêm nếu có giá trị thực (Tránh lỗi gửi chuỗi rỗng)
+				if len(vals) > 0 && vals[0] != "" { 
+					c.MatchCols[idx] = vals; c.IsEmpty = false 
+				}
 			}
 		} else if strings.HasPrefix(k, "contains_col_") {
 			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "contains_col_")); err == nil {
 				vals := ToSlice(v)
-				if len(vals) > 0 { c.ContainsCols[idx] = vals; c.IsEmpty = false }
+				if len(vals) > 0 && vals[0] != "" { 
+					c.ContainsCols[idx] = vals; c.IsEmpty = false 
+				}
 			}
 		} else if strings.HasPrefix(k, "min_col_") {
 			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "min_col_")); err == nil {
@@ -141,7 +154,6 @@ func parseCriteriaSet(input interface{}) CriteriaSet {
 }
 
 func parseFilterParams(body map[string]interface{}) FilterParams {
-	// 🔥 KHỞI TẠO VỚI IsEmpty = true ĐỂ TRÁNH LỖI ZERO VALUE
 	f := FilterParams{
 		AndCriteria: NewCriteriaSet(),
 		OrCriteria:  NewCriteriaSet(),
@@ -155,22 +167,19 @@ func parseFilterParams(body map[string]interface{}) FilterParams {
 		f.OrCriteria = parseCriteriaSet(v)
 	}
 	
-	// Bây giờ IsEmpty mặc định là true, nên phép kiểm tra này sẽ ĐÚNG
 	if !f.AndCriteria.IsEmpty || !f.OrCriteria.IsEmpty {
 		f.HasFilter = true
 	}
 	return f
 }
 
-// ... (Giữ nguyên checkCriteriaMatch, isRowMatched, QualityCheck, Profiles...) ...
+// ... (Giữ nguyên phần checkCriteriaMatch, isRowMatched, QualityCheck, Profiles...) ...
 func checkCriteriaMatch(cleanRow []string, rawRow []interface{}, c CriteriaSet, modeMatchAll bool) bool {
 	if c.IsEmpty { return true }
-	
 	processResult := func(isMatch bool) (bool, bool) {
 		if modeMatchAll { if !isMatch { return false, true } } else { if isMatch { return true, true } }
 		return false, false
 	}
-
 	for idx, targets := range c.MatchCols {
 		cellVal := ""; if idx < len(cleanRow) { cellVal = cleanRow[idx] }
 		match := false
@@ -199,7 +208,6 @@ func checkCriteriaMatch(cleanRow []string, rawRow []interface{}, c CriteriaSet, 
 		match := timeVal > 0 && (float64(now-timeVal)/3600000.0 <= hours)
 		if res, stop := processResult(match); stop { return res }
 	}
-
 	if modeMatchAll { return true } else { return false }
 }
 
