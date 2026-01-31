@@ -15,9 +15,10 @@ import (
 =================================================================================================
 
 1. MỤC ĐÍCH:
-   - Cập nhật thông tin tài khoản (Trạng thái, Ghi chú, Cookie,...) vào hệ thống.
+   - Cập nhật thông tin tài khoản (Trạng thái, Ghi chú, Cookie...) vào hệ thống.
    - Hỗ trợ cập nhật 1 dòng hoặc nhiều dòng cùng lúc.
    - Tự động đồng bộ RAM để các tiến trình khác nhận diện thay đổi ngay lập tức.
+   - 🔥 ĐẶC BIỆT: Khi cập nhật Note, hệ thống sẽ BẢO TOÀN số lần chạy cũ.
 
 2. CẤU TRÚC BODY REQUEST:
 {
@@ -27,7 +28,7 @@ import (
   "sheet": "DataTiktok",      // (Tùy chọn) Tên sheet, mặc định là DataTiktok
   
   // --- PHẦN 1: ĐIỀU KIỆN TÌM KIẾM (FILTER) ---
-  "row_index": 123,           // (Ưu tiên 1) Cập nhật chính xác dòng 123
+  "row_index": 123,           // (Ưu tiên 1) Cập nhật chính xác dòng 123 (Index tính từ 0)
   
   "search_and": {             // (Ưu tiên 2) Tìm dòng thỏa mãn TẤT CẢ điều kiện
       "match_col_0": ["đang chạy"],
@@ -38,7 +39,7 @@ import (
   // QUY TẮC: Chỉ sử dụng key dạng "col_X" (X là số thứ tự cột, bắt đầu từ 0)
   "updated": {
       "col_0": "Đang chạy",              // Cập nhật Cột 0 (Status)
-      "col_1": "Nội dung ghi chú mới",   // Cập nhật Cột 1 (Note)
+      "col_1": "Nội dung ghi chú mới",   // Cập nhật Cột 1 (Note) - Sẽ tự động giữ số lần chạy cũ
       "col_17": "cookie_mới_ở_đây"       // Cập nhật Cột 17 (Cookie)
   }
 }
@@ -64,28 +65,29 @@ type UpdateResponse struct {
 // =================================================================================================
 
 func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
-	// 1. Giải mã JSON
+	// 1. Giải mã JSON từ Body
 	var body map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, `{"status":"false","messenger":"Lỗi định dạng JSON"}`, 400)
 		return
 	}
 
-	// 2. Lấy Token Context
+	// 2. Lấy Token từ Context (Middleware đã xác thực)
 	tokenData, ok := r.Context().Value("tokenData").(*TokenData)
 	if !ok { return }
 
-	// 3. Chuẩn hóa đầu vào
+	// 3. Chuẩn hóa dữ liệu đầu vào
 	sid := tokenData.SpreadsheetID
 	deviceId := CleanString(body["deviceId"])
 	reqType := CleanString(body["type"])
 	
+	// Mặc định là updated (sửa 1 dòng) nếu không gửi type
 	if reqType == "" { reqType = "updated" }
 
-	// 4. Xử lý Logic
+	// 4. Gọi hàm xử lý logic
 	res, err := xu_ly_update_logic(sid, deviceId, reqType, body)
 
-	// 5. Trả về kết quả
+	// 5. Trả về kết quả JSON
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": err.Error()})
@@ -99,16 +101,16 @@ func HandleUpdateData(w http.ResponseWriter, r *http.Request) {
 // =================================================================================================
 
 func xu_ly_update_logic(sid, deviceId, reqType string, body map[string]interface{}) (*UpdateResponse, error) {
-	// BƯỚC 1: Xác định Sheet
+	// BƯỚC 1: Xác định Sheet cần thao tác
 	sheetName := CleanString(body["sheet"])
 	if sheetName == "" { sheetName = SHEET_NAMES.DATA_TIKTOK }
 	isDataTiktok := (sheetName == SHEET_NAMES.DATA_TIKTOK)
 
-	// BƯỚC 2: Tải dữ liệu từ Cache
+	// BƯỚC 2: Tải dữ liệu từ Cache (Tối ưu tốc độ đọc)
 	cacheData, err := LayDuLieu(sid, sheetName, false)
 	if err != nil { return nil, fmt.Errorf("Lỗi tải dữ liệu hệ thống") }
 
-	// BƯỚC 3: Phân tích bộ lọc
+	// BƯỚC 3: Phân tích bộ lọc (Filter)
 	filters := parseFilterParams(body)
 	
 	rowIndexInput := -1
@@ -122,7 +124,7 @@ func xu_ly_update_logic(sid, deviceId, reqType string, body map[string]interface
 		return nil, fmt.Errorf("Không có dữ liệu để cập nhật (block 'updated' trống)")
 	}
 
-	// BƯỚC 5: KHÓA DỮ LIỆU (LOCK) - Bắt đầu ghi
+	// BƯỚC 5: KHÓA DỮ LIỆU (LOCK) - Bắt đầu quy trình ghi
 	STATE.SheetMutex.Lock()
 	defer STATE.SheetMutex.Unlock()
 
@@ -133,12 +135,13 @@ func xu_ly_update_logic(sid, deviceId, reqType string, body map[string]interface
 	lastUpdatedIdx := -1
 	var lastUpdatedRow []interface{}
 
-	// --- CHIẾN LƯỢC A: CẬP NHẬT THEO ROW_INDEX (Trực tiếp) ---
+	// --- CHIẾN LƯỢC A: CẬP NHẬT THEO ROW_INDEX (Trực tiếp & Nhanh nhất) ---
 	if rowIndexInput >= RANGES.DATA_START_ROW {
 		idx := rowIndexInput - RANGES.DATA_START_ROW
 		
+		// Kiểm tra dòng có tồn tại hợp lệ không
 		if idx >= 0 && idx < len(rows) {
-			// Kiểm tra Filter kèm theo (nếu có)
+			// Nếu có bộ lọc kèm theo, phải kiểm tra khớp mới cho sửa
 			if filters.HasFilter {
 				if !isRowMatched(cleanRows[idx], rows[idx], filters) {
 					return nil, fmt.Errorf("Dữ liệu dòng %d không khớp điều kiện lọc", rowIndexInput)
@@ -148,7 +151,7 @@ func xu_ly_update_logic(sid, deviceId, reqType string, body map[string]interface
 			// Thực hiện Update vào RAM
 			applyUpdateToRow(cacheData, idx, updateData, deviceId, isDataTiktok)
 			
-			// Đẩy xuống Queue ghi đĩa
+			// Đẩy xuống hàng đợi ghi đĩa (Async)
 			QueueUpdate(sid, sheetName, idx, cacheData.RawValues[idx])
 			
 			return &UpdateResponse{
@@ -172,17 +175,17 @@ func xu_ly_update_logic(sid, deviceId, reqType string, body map[string]interface
 		// Kiểm tra dòng có khớp bộ lọc không
 		if isRowMatched(cleanRow, rows[i], filters) {
 			
-			// Update RAM
+			// Cập nhật RAM
 			applyUpdateToRow(cacheData, i, updateData, deviceId, isDataTiktok)
 			
-			// Update Disk
+			// Cập nhật Đĩa
 			QueueUpdate(sid, sheetName, i, cacheData.RawValues[i])
 
 			updatedCount++
 			lastUpdatedIdx = i
 			lastUpdatedRow = cacheData.RawValues[i]
 
-			// Nếu chỉ sửa 1 dòng -> Dừng ngay
+			// Nếu chế độ chỉ sửa 1 dòng -> Dừng ngay
 			if reqType == "updated" { break }
 		}
 	}
@@ -212,15 +215,15 @@ func xu_ly_update_logic(sid, deviceId, reqType string, body map[string]interface
 // 🛠 CÁC HÀM HỖ TRỢ (HELPER FUNCTIONS)
 // =================================================================================================
 
-// Lọc dữ liệu update, chỉ chấp nhận key "col_X"
+// Lọc dữ liệu update từ JSON, chỉ chấp nhận key "col_X"
 func prepareUpdateData(body map[string]interface{}) map[int]interface{} {
 	cols := make(map[int]interface{})
 	if v, ok := body["updated"]; ok {
 		if updatedMap, ok := v.(map[string]interface{}); ok {
 			for k, val := range updatedMap {
-				// Chỉ nhận key bắt đầu bằng "col_"
+				// Chỉ nhận key bắt đầu bằng "col_" (Ví dụ: col_10)
 				if strings.HasPrefix(k, "col_") {
-					// Cắt lấy số Index (col_10 -> 10)
+					// Cắt lấy số Index phía sau
 					if idxStr := strings.TrimPrefix(k, "col_"); idxStr != "" {
 						if idx, err := strconv.Atoi(idxStr); err == nil {
 							cols[idx] = val
@@ -255,14 +258,14 @@ func applyUpdateToRow(cache *SheetCacheData, idx int, updateCols map[int]interfa
 
 	// 2. Logic riêng cho DataTiktok (Xử lý Note & Đồng bộ Map)
 	if isDataTiktok {
-		// Cập nhật DeviceId nếu có
+		// Cập nhật DeviceId nếu có (Ưu tiên từ Root Request)
 		if deviceId != "" {
 			row[INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
 			cleanRow[INDEX_DATA_TIKTOK.DEVICE_ID] = CleanString(deviceId)
 		}
 
-		// --- XỬ LÝ NOTE THÔNG MINH ---
-		// Kiểm tra xem có update Status hoặc Note không
+		// --- XỬ LÝ NOTE THÔNG MINH (FIX LỖI MẤT SỐ LẦN) ---
+		// Kiểm tra xem request có update Status hoặc Note không
 		_, hasSt := updateCols[INDEX_DATA_TIKTOK.STATUS] 
 		_, hasNote := updateCols[INDEX_DATA_TIKTOK.NOTE]
 		
@@ -271,18 +274,19 @@ func applyUpdateToRow(cache *SheetCacheData, idx int, updateCols map[int]interfa
 			content := ""
 			if v, ok := updateCols[INDEX_DATA_TIKTOK.NOTE]; ok { content = fmt.Sprintf("%v", v) }
 			
-			// Lấy dữ liệu cũ để tính số lần chạy
+			// Lấy dữ liệu cũ (ĐỂ TRÍCH XUẤT SỐ LẦN CHẠY)
 			oldNoteInRow := fmt.Sprintf("%v", row[INDEX_DATA_TIKTOK.NOTE]) 
 			newStatusRaw := fmt.Sprintf("%v", row[INDEX_DATA_TIKTOK.STATUS])
 			
 			// Tạo note chuẩn (Giữ nguyên số lần bằng Regex)
 			finalNote := tao_ghi_chu_chuan_update(oldNoteInRow, content, newStatusRaw)
 			
+			// Ghi đè lại
 			row[INDEX_DATA_TIKTOK.NOTE] = finalNote
 			cleanRow[INDEX_DATA_TIKTOK.NOTE] = CleanString(finalNote)
 		}
 
-		// --- ĐỒNG BỘ RAM (RẤT QUAN TRỌNG) ---
+		// --- ĐỒNG BỘ RAM (QUAN TRỌNG) ---
 		
 		// 1. Đồng bộ StatusMap (Để tìm nick theo trạng thái)
 		newStatus := cleanRow[INDEX_DATA_TIKTOK.STATUS]
@@ -298,12 +302,14 @@ func applyUpdateToRow(cache *SheetCacheData, idx int, updateCols map[int]interfa
 			if oldDev != "" { 
 				delete(cache.AssignedMap, oldDev) 
 			} else { 
-				removeFromIntList(&cache.UnassignedList, idx) 
+				// ⚠️ Dùng hàm removeFromIntList (Có trong utils.go, vì cùng package main nên gọi được)
+				removeFromIntList(cache.UnassignedList, idx) 
 			}
 			// Thêm vào vị trí mới
 			if newDev != "" { 
 				cache.AssignedMap[newDev] = idx 
 			} else { 
+				// ⚠️ Dùng logic append trực tiếp
 				cache.UnassignedList = append(cache.UnassignedList, idx) 
 			}
 		}
@@ -315,24 +321,30 @@ func applyUpdateToRow(cache *SheetCacheData, idx int, updateCols map[int]interfa
 // Logic tạo Note Update: Dùng Regex để giữ nguyên số lần chạy cũ
 func tao_ghi_chu_chuan_update(oldNote, content, newStatus string) string {
 	nowFull := time.Now().Add(7 * time.Hour).Format("02/01/2006 15:04:05")
+	
+	// 🔥 QUAN TRỌNG: Làm sạch note cũ để Regex hoạt động chuẩn
 	oldNote = SafeString(oldNote) 
 	
 	count := 1 
-	// Dùng Regex bắt số lần (Chính xác 100%)
+	// 🔥 Dùng Regex bắt số lần từ note cũ (Chính xác 100%)
 	match := REGEX_COUNT.FindStringSubmatch(oldNote)
 	if len(match) > 1 {
 		if c, err := strconv.Atoi(match[1]); err == nil {
-			count = c
+			count = c // TÌM THẤY -> GIỮ NGUYÊN SỐ LẦN NÀY
 		}
 	}
 
 	// Ưu tiên nội dung gửi lên -> nếu không thì dùng status -> nếu không thì giữ dòng cũ
 	statusToUse := content
 	if statusToUse == "" { statusToUse = newStatus }
+	
+	// Nếu vẫn rỗng, cố gắng lấy dòng đầu của note cũ (giữ trạng thái cũ)
 	if statusToUse == "" {
 		lines := strings.Split(oldNote, "\n")
 		if len(lines) > 0 { statusToUse = lines[0] }
 	}
+	
+	// Fallback cuối cùng
 	if statusToUse == "" { statusToUse = "Đang chạy" }
 
 	return fmt.Sprintf("%s\n%s (Lần %d)", statusToUse, nowFull, count)
