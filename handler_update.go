@@ -177,15 +177,11 @@ func xu_ly_update_logic(sid, deviceId, reqType string, body map[string]interface
 // 🛠 HELPER FUNCTIONS
 // =================================================================================================
 
-// 🔥 Sửa lại: Chỉ lấy dữ liệu trong block "updated"
 func prepareUpdateData(body map[string]interface{}) map[int]interface{} {
 	cols := make(map[int]interface{})
-	
-	// Kiểm tra xem có key "updated" không
 	if v, ok := body["updated"]; ok {
 		if updatedMap, ok := v.(map[string]interface{}); ok {
 			for k, val := range updatedMap {
-				// 1. Quét col_X
 				if strings.HasPrefix(k, "col_") {
 					if idxStr := strings.TrimPrefix(k, "col_"); idxStr != "" {
 						if idx, err := strconv.Atoi(idxStr); err == nil {
@@ -193,7 +189,6 @@ func prepareUpdateData(body map[string]interface{}) map[int]interface{} {
 						}
 					}
 				}
-				// 2. Quét các key đặc biệt (status, note)
 				if k == "status" { cols[INDEX_DATA_TIKTOK.STATUS] = val }
 				if k == "note" { cols[INDEX_DATA_TIKTOK.NOTE] = val }
 			}
@@ -226,7 +221,7 @@ func applyUpdateToRow(cache *SheetCacheData, idx int, updateCols map[int]interfa
 			cleanRow[INDEX_DATA_TIKTOK.DEVICE_ID] = CleanString(deviceId)
 		}
 
-		// Xử lý Note
+		// Xử lý Note (Dùng logic mới để giữ nguyên số lần)
 		content := ""
 		if v, ok := updateCols[INDEX_DATA_TIKTOK.NOTE]; ok { content = fmt.Sprintf("%v", v) }
 		
@@ -267,21 +262,35 @@ func removeFromIntList(list *[]int, target int) {
 	}
 }
 
+// 🔥 HÀM NÀY ĐÃ ĐƯỢC FIX LOGIC GIỮ NGUYÊN SỐ LẦN (DÙNG REGEX)
 func tao_ghi_chu_chuan_update(oldNote, content, newStatus string) string {
 	nowFull := time.Now().Add(7 * time.Hour).Format("02/01/2006 15:04:05")
-	count := 0
-	oldNote = strings.TrimSpace(oldNote)
-	lines := strings.Split(oldNote, "\n")
-	if idx := strings.Index(oldNote, "(Lần"); idx != -1 {
-		end := strings.Index(oldNote[idx:], ")")
-		if end != -1 {
-			if c, err := strconv.Atoi(strings.TrimSpace(oldNote[idx+len("(Lần") : idx+end])); err == nil { count = c }
+	
+	// 1. Chuẩn hóa note cũ (Để tránh lỗi ký tự ẩn làm hỏng Regex)
+	oldNote = SafeString(oldNote) 
+	
+	count := 1 // Mặc định là 1 nếu không tìm thấy
+
+	// 2. Dùng Regex toàn cục (đã khai báo trong config.go) để bắt số lần
+	// Regex: `\(Lần\s*(\d+)\)`
+	// Ưu điểm: Bắt cực chuẩn, không sợ khoảng trắng thừa thiếu hay ký tự lạ
+	match := REGEX_COUNT.FindStringSubmatch(oldNote)
+	if len(match) > 1 {
+		if c, err := strconv.Atoi(match[1]); err == nil {
+			count = c // GIỮ NGUYÊN SỐ LẦN TÌM ĐƯỢC
 		}
 	}
-	if count == 0 { count = 1 }
+
+	// 3. Xác định nội dung Status
 	statusToUse := content
 	if statusToUse == "" { statusToUse = newStatus }
-	if statusToUse == "" && len(lines) > 0 { statusToUse = lines[0] }
+	
+	// Nếu vẫn rỗng, lấy dòng đầu của note cũ (giữ trạng thái cũ)
+	if statusToUse == "" {
+		lines := strings.Split(oldNote, "\n")
+		if len(lines) > 0 { statusToUse = lines[0] }
+	}
 	if statusToUse == "" { statusToUse = "Đang chạy" }
-	return statusToUse + "\n" + nowFull + " (Lần " + strconv.Itoa(count) + ")"
+
+	return fmt.Sprintf("%s\n%s (Lần %d)", statusToUse, nowFull, count)
 }
