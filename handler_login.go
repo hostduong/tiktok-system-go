@@ -18,12 +18,13 @@ type LoginResponse struct {
 	AuthProfile     AuthProfile     `json:"auth_profile"`
 	ActivityProfile ActivityProfile `json:"activity_profile"`
 	AiProfile       AiProfile       `json:"ai_profile"`
+	DebugLog        string          `json:"debug_log,omitempty"` // 🔥 Thêm trường này để soi lỗi
 }
 
 type PriorityStep struct {
 	Status  string
-	IsMy    bool // Nick của deviceId
-	IsEmpty bool // Nick trống
+	IsMy    bool
+	IsEmpty bool
 	PrioID  int
 }
 
@@ -41,85 +42,105 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 	deviceId := CleanString(body["deviceId"])
 	reqType := CleanString(body["type"])
 	
-	// Map Type sang Action chuẩn
 	action := "login"
 	if reqType == "register" { action = "register" } else if reqType == "auto" { action = "auto" } else if reqType == "auto_reset" { action = "auto_reset" } else if reqType == "login_reset" { action = "login_reset" }
 	
-	res, err := xu_ly_lay_du_lieu(sid, deviceId, body, action)
+	updateMap := parseUpdateDataLogin(body)
+
+	res, err := xu_ly_lay_du_lieu(sid, deviceId, body, action, updateMap)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": err.Error()})
+		// 🔥 TRẢ VỀ LỖI KÈM DEBUG LOG
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":    "false",
+			"messenger": err.Error(),
+		})
 		return
 	}
 	json.NewEncoder(w).Encode(res)
 }
 
-func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action string) (*LoginResponse, error) {
+func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action string, updateMap map[int]interface{}) (*LoginResponse, error) {
 	cacheData, err := LayDuLieu(sid, SHEET_NAMES.DATA_TIKTOK, false)
 	if err != nil { return nil, fmt.Errorf("Lỗi tải dữ liệu") }
 
-	// 1. Parse Filters
 	filters := parseFilterParams(body)
 	STATE.SheetMutex.RLock()
 	rawLen := len(cacheData.RawValues)
 
-	// 2. CHIẾN LƯỢC: ROW INDEX (ƯU TIÊN TUYỆT ĐỐI)
+	// 🔥 BIẾN GHI LOG (Dùng để điều tra)
+	var traceLog []string
+	addLog := func(msg string) { traceLog = append(traceLog, msg) }
+
+	// 1. ROW INDEX
 	if v, ok := body["row_index"]; ok {
 		if val, ok := toFloat(v); ok {
 			idx := int(val) - RANGES.DATA_START_ROW
 			if idx >= 0 && idx < rawLen {
-				// Nếu có Filter -> Phải khớp mới lấy
 				if filters.HasFilter {
 					if !isRowMatched(cacheData.CleanValues[idx], cacheData.RawValues[idx], filters) {
-						STATE.SheetMutex.RUnlock(); return nil, fmt.Errorf("row_index không khớp điều kiện tìm kiếm")
+						STATE.SheetMutex.RUnlock(); return nil, fmt.Errorf("row_index không khớp filter")
 					}
 				}
-				// Lấy luôn (Bỏ qua check status, chỉ check quality lấy email)
 				valQ := KiemTraChatLuongClean(cacheData.CleanValues[idx], action)
 				STATE.SheetMutex.RUnlock()
-				return commit_and_response(sid, deviceId, cacheData, idx, determineType(cacheData.CleanValues[idx]), valQ.SystemEmail, action, 0)
+				return commit_and_response(sid, deviceId, cacheData, idx, determineType(cacheData.CleanValues[idx]), valQ.SystemEmail, action, 0, updateMap)
 			}
 			STATE.SheetMutex.RUnlock(); return nil, fmt.Errorf("row_index không tồn tại")
 		}
 	}
 
-	// 3. CHIẾN LƯỢC: PRIORITY STEPS
+	// 2. PRIORITY STEPS
 	steps := buildPrioritySteps(action)
+	addLog(fmt.Sprintf("Start Auto for Device='%s'. Steps: %d", deviceId, len(steps)))
 
 	for _, step := range steps {
 		indices := cacheData.StatusMap[step.Status]
+		// Chỉ log nếu tìm thấy nhóm trạng thái này
+		if len(indices) > 0 {
+			addLog(fmt.Sprintf("Step '%s' (Prio %d): Found %d rows", step.Status, step.PrioID, len(indices)))
+		}
+
 		for _, idx := range indices {
 			if idx < rawLen {
 				row := cacheData.CleanValues[idx]
+				
+				// 🔥 LOG CHI TIẾT CHO DÒNG 14 (Index 3)
+				if idx == 3 { 
+					addLog(fmt.Sprintf("--> CHECK ROW 14: Dev='%s' vs Req='%s'", row[INDEX_DATA_TIKTOK.DEVICE_ID], deviceId))
+				}
+
 				isMyDevice := (row[INDEX_DATA_TIKTOK.DEVICE_ID] == deviceId)
 				isEmptyDevice := (row[INDEX_DATA_TIKTOK.DEVICE_ID] == "")
 				
 				if (step.IsMy && isMyDevice) || (step.IsEmpty && isEmptyDevice) {
-					// Check Filter (Nếu HasFilter = false thì isRowMatched luôn True -> bỏ qua bước lọc nội dung)
 					if filters.HasFilter {
-						if !isRowMatched(row, cacheData.RawValues[idx], filters) { continue }
+						if !isRowMatched(row, cacheData.RawValues[idx], filters) { 
+							if idx == 3 { addLog("--> Row 14 Failed: Filter Mismatch") }
+							continue 
+						}
 					}
 					
-					// Check Quality
 					val := KiemTraChatLuongClean(row, action)
 					if !val.Valid {
+						if idx == 3 { addLog(fmt.Sprintf("--> Row 14 Failed: Quality (%s)", val.Missing)) }
 						STATE.SheetMutex.RUnlock(); doSelfHealing(sid, idx, val.Missing, cacheData); STATE.SheetMutex.RLock()
 						continue
 					}
 
-					// CHỐT ĐƠN
 					STATE.SheetMutex.RUnlock(); STATE.SheetMutex.Lock()
 					currRow := cacheData.CleanValues[idx]
-					// Double check
 					if (step.IsMy && currRow[INDEX_DATA_TIKTOK.DEVICE_ID] == deviceId) || (step.IsEmpty && currRow[INDEX_DATA_TIKTOK.DEVICE_ID] == "") {
 						cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
 						cacheData.RawValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
 						cacheData.AssignedMap[deviceId] = idx
 						STATE.SheetMutex.Unlock()
-						return commit_and_response(sid, deviceId, cacheData, idx, determineType(cacheData.CleanValues[idx]), val.SystemEmail, action, step.PrioID)
+						return commit_and_response(sid, deviceId, cacheData, idx, determineType(cacheData.CleanValues[idx]), val.SystemEmail, action, step.PrioID, updateMap)
 					}
 					STATE.SheetMutex.Unlock(); STATE.SheetMutex.RLock()
+				} else {
+					if idx == 3 { addLog(fmt.Sprintf("--> Row 14 Failed: Device Mismatch (MyConfig=%v, EmptyConfig=%v)", step.IsMy, step.IsEmpty)) }
 				}
 			}
 		}
@@ -133,58 +154,41 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 		completedIndices := cacheData.StatusMap[STATUS_READ.COMPLETED]
 		for _, idx := range completedIndices {
 			if idx < rawLen && cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] == deviceId {
-				STATE.SheetMutex.RUnlock(); return nil, fmt.Errorf("Các tài khoản đã hoàn thành")
+				STATE.SheetMutex.RUnlock() 
+				// 🔥 TRẢ VỀ LỖI KÈM LOG DEBUG
+				return nil, fmt.Errorf("Các tài khoản đã hoàn thành. [DEBUG: %s]", strings.Join(traceLog, " | "))
 			}
 		}
 	}
 
 	STATE.SheetMutex.RUnlock()
-	return nil, fmt.Errorf("Không còn tài khoản phù hợp")
+	return nil, fmt.Errorf("Không còn tài khoản phù hợp. [DEBUG: %s]", strings.Join(traceLog, " | "))
 }
 
-// buildPrioritySteps: Logic ưu tiên chuẩn theo yêu cầu Nhóm A, B, C
+// ... (Giữ nguyên các hàm helper phía dưới như buildPrioritySteps, commit_and_response...) ...
 func buildPrioritySteps(action string) []PriorityStep {
 	steps := make([]PriorityStep, 0, 10)
 	add := func(st string, my, empty bool, prio int) {
 		steps = append(steps, PriorityStep{Status: st, IsMy: my, IsEmpty: empty, PrioID: prio})
 	}
-
-	// NHÓM A: LOGIN / LOGIN_RESET
 	if action == "login" || action == "login_reset" {
-		add(STATUS_READ.RUNNING, true, false, 1) // Bước 1: Đang chạy
-		add(STATUS_READ.WAITING, true, false, 2) // Bước 2: Đang chờ
-		add(STATUS_READ.LOGIN, true, false, 3); add(STATUS_READ.LOGIN, false, true, 3) // Bước 3: Đăng nhập
-		
-		if action == "login_reset" {
-			add(STATUS_READ.COMPLETED, true, false, 4) // Bước 4: Hoàn thành (Reset)
-		}
-
-	// NHÓM B: REGISTER
+		add(STATUS_READ.RUNNING, true, false, 1); add(STATUS_READ.WAITING, true, false, 2)
+		add(STATUS_READ.LOGIN, true, false, 3); add(STATUS_READ.LOGIN, false, true, 4)
+		if action == "login_reset" { add(STATUS_READ.COMPLETED, true, false, 5) }
 	} else if action == "register" {
-		add(STATUS_READ.REGISTERING, true, false, 1) // Bước 1: Đang đăng ký
-		add(STATUS_READ.WAIT_REG, true, false, 2)    // Bước 2: Chờ đăng ký
-		add(STATUS_READ.REGISTER, true, false, 3); add(STATUS_READ.REGISTER, false, true, 3) // Bước 3: Đăng ký
-
-	// NHÓM C: AUTO / AUTO_RESET
+		add(STATUS_READ.REGISTERING, true, false, 1); add(STATUS_READ.WAIT_REG, true, false, 2)
+		add(STATUS_READ.REGISTER, true, false, 3); add(STATUS_READ.REGISTER, false, true, 4)
 	} else if action == "auto" || action == "auto_reset" {
-		// Login trước
-		add(STATUS_READ.RUNNING, true, false, 1)
-		add(STATUS_READ.WAITING, true, false, 2)
-		add(STATUS_READ.LOGIN, true, false, 3); add(STATUS_READ.LOGIN, false, true, 3)
-		
-		if action == "auto_reset" {
-			add(STATUS_READ.COMPLETED, true, false, 4) // Bước 4: Hoàn thành
-		}
-
-		// Register sau
-		add(STATUS_READ.REGISTERING, true, false, 5) // Bước 5: Đang đăng ký
-		add(STATUS_READ.WAIT_REG, true, false, 6)    // Bước 6: Chờ đăng ký
-		add(STATUS_READ.REGISTER, true, false, 7); add(STATUS_READ.REGISTER, false, true, 7) // Bước 7: Đăng ký
+		add(STATUS_READ.RUNNING, true, false, 1); add(STATUS_READ.WAITING, true, false, 2)
+		add(STATUS_READ.LOGIN, true, false, 3); add(STATUS_READ.LOGIN, false, true, 4)
+		if action == "auto_reset" { add(STATUS_READ.COMPLETED, true, false, 99) }
+		add(STATUS_READ.REGISTERING, true, false, 5); add(STATUS_READ.WAIT_REG, true, false, 6)
+		add(STATUS_READ.REGISTER, true, false, 7); add(STATUS_READ.REGISTER, false, true, 8)
 	}
 	return steps
 }
 
-func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, typ, email, action string, priority int) (*LoginResponse, error) {
+func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, typ, email, action string, priority int, updateMap map[int]interface{}) (*LoginResponse, error) {
 	row := cache.RawValues[idx]
 	tSt := STATUS_WRITE.RUNNING
 	if typ == "register" { tSt = STATUS_WRITE.REGISTERING }
@@ -192,10 +196,7 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 	oldNote := SafeString(row[INDEX_DATA_TIKTOK.NOTE])
 	mode := "normal"
 	isResetCompleted := false
-	
-	// Logic Reset: Nếu action chứa reset VÀ Priority khớp với bước lấy Completed
-	// Login Reset (Prio 4) hoặc Auto Reset (Prio 4)
-	if (strings.Contains(action, "reset")) && (priority == 4) {
+	if (strings.Contains(action, "reset")) && (priority == 5 || priority == 99) {
 		mode = "reset"; isResetCompleted = true
 	}
 	tNote := tao_ghi_chu_chuan(oldNote, tSt, mode)
@@ -227,8 +228,20 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 	cache.RawValues[idx][INDEX_DATA_TIKTOK.STATUS] = tSt
 	cache.RawValues[idx][INDEX_DATA_TIKTOK.NOTE] = tNote
 	cache.RawValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
+	
+	for colIdx, val := range updateMap {
+		if colIdx >= 0 && colIdx < len(cache.RawValues[idx]) {
+			if colIdx == INDEX_DATA_TIKTOK.STATUS || colIdx == INDEX_DATA_TIKTOK.NOTE || colIdx == INDEX_DATA_TIKTOK.DEVICE_ID { continue }
+			cache.RawValues[idx][colIdx] = val
+			if colIdx < CACHE.CLEAN_COL_LIMIT {
+				cache.CleanValues[idx][colIdx] = CleanString(val)
+			}
+		}
+	}
+
 	if INDEX_DATA_TIKTOK.STATUS < CACHE.CLEAN_COL_LIMIT { cache.CleanValues[idx][INDEX_DATA_TIKTOK.STATUS] = CleanString(tSt) }
 	if INDEX_DATA_TIKTOK.NOTE < CACHE.CLEAN_COL_LIMIT { cache.CleanValues[idx][INDEX_DATA_TIKTOK.NOTE] = CleanString(tNote) }
+	
 	if oldCleanSt != CleanString(tSt) {
 		removeFromStatusMap(cache.StatusMap, oldCleanSt, idx)
 		newSt := CleanString(tSt)
@@ -240,6 +253,14 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 	newRow[INDEX_DATA_TIKTOK.STATUS] = tSt
 	newRow[INDEX_DATA_TIKTOK.NOTE] = tNote
 	newRow[INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
+	
+	for colIdx, val := range updateMap {
+		if colIdx >= 0 && colIdx < len(newRow) {
+			if colIdx == INDEX_DATA_TIKTOK.STATUS || colIdx == INDEX_DATA_TIKTOK.NOTE || colIdx == INDEX_DATA_TIKTOK.DEVICE_ID { continue }
+			newRow[colIdx] = val
+		}
+	}
+	
 	QueueUpdate(sid, SHEET_NAMES.DATA_TIKTOK, idx, newRow)
 
 	msg := "Lấy nick thành công"
@@ -249,6 +270,25 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 	}, nil
 }
 
+func parseUpdateDataLogin(body map[string]interface{}) map[int]interface{} {
+	cols := make(map[int]interface{})
+	if v, ok := body["updated"]; ok {
+		if updatedMap, ok := v.(map[string]interface{}); ok {
+			for k, val := range updatedMap {
+				if strings.HasPrefix(k, "col_") {
+					if idxStr := strings.TrimPrefix(k, "col_"); idxStr != "" {
+						if idx, err := strconv.Atoi(idxStr); err == nil {
+							cols[idx] = val
+						}
+					}
+				}
+			}
+		}
+	}
+	return cols
+}
+
+func checkStatusIsValid(currentStatus, action string) bool { return true }
 func determineType(row []string) string {
 	st := row[INDEX_DATA_TIKTOK.STATUS]
 	if st == STATUS_READ.REGISTER || st == STATUS_READ.REGISTERING || st == STATUS_READ.WAIT_REG { return "register" }
