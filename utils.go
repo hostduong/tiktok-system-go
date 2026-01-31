@@ -16,11 +16,9 @@ import (
 // =================================================================================================
 
 // Regex xóa ký tự ẩn (Non-breaking space, Zero-width space...)
-// Biến này chỉ dùng nội bộ trong utils nên giữ lại ở đây
 var REGEX_INVISIBLE = regexp.MustCompile(`[\x{00A0}\x{200B}\x{200C}\x{200D}\x{FEFF}]`)
 
-// ⚠️ LƯU Ý: REGEX_DATE và REGEX_COUNT đã được xóa khỏi file này
-// Hệ thống sẽ tự động sử dụng biến đã khai báo bên file config.go
+// ⚠️ LƯU Ý: REGEX_DATE và REGEX_COUNT sử dụng từ config.go để tránh lỗi redeclared
 
 // Làm sạch chuỗi: Chuyển về chữ thường, chuẩn hóa Unicode NFC, xóa ký tự ẩn
 func CleanString(v interface{}) string {
@@ -94,7 +92,6 @@ func ConvertSerialDate(v interface{}) int64 {
 
 // =================================================================================================
 // 🟢 2. CÁC HÀM QUẢN LÝ MAP/LIST DÙNG CHUNG
-// (Đặt ở đây để handler_login và handler_update cùng gọi được)
 // =================================================================================================
 
 // Xóa một chỉ số dòng (targetIdx) khỏi StatusMap
@@ -120,7 +117,7 @@ func removeFromIntList(list *[]int, target int) {
 }
 
 // =================================================================================================
-// 🟢 3. BỘ MÁY LỌC (FILTER ENGINE) - ĐÃ TỐI ƯU ZERO VALUE
+// 🟢 3. BỘ MÁY LỌC (FILTER ENGINE)
 // =================================================================================================
 
 type CriteriaSet struct {
@@ -138,7 +135,6 @@ type FilterParams struct {
 	HasFilter   bool
 }
 
-// Khởi tạo CriteriaSet với IsEmpty = true (Tránh lỗi lọc sai khi không có điều kiện)
 func NewCriteriaSet() CriteriaSet {
 	return CriteriaSet{
 		MatchCols:    make(map[int][]string),
@@ -150,7 +146,6 @@ func NewCriteriaSet() CriteriaSet {
 	}
 }
 
-// Phân tích JSON Input thành CriteriaSet
 func parseCriteriaSet(input interface{}) CriteriaSet {
 	c := NewCriteriaSet()
 	data, ok := input.(map[string]interface{})
@@ -197,7 +192,6 @@ func parseFilterParams(body map[string]interface{}) FilterParams {
 	return f
 }
 
-// Logic kiểm tra một dòng có khớp điều kiện lọc không
 func checkCriteriaMatch(cleanRow []string, rawRow []interface{}, c CriteriaSet, modeMatchAll bool) bool {
 	if c.IsEmpty { return true }
 	
@@ -249,7 +243,7 @@ func isRowMatched(cleanRow []string, rawRow []interface{}, f FilterParams) bool 
 }
 
 // =================================================================================================
-// 🟢 4. KIỂM TRA CHẤT LƯỢNG & TẠO PROFILE (GIỮ NGUYÊN)
+// 🟢 4. KIỂM TRA CHẤT LƯỢNG & TẠO PROFILE
 // =================================================================================================
 
 type QualityResult struct { Valid bool; SystemEmail string; Missing string }
@@ -274,7 +268,6 @@ func KiemTraChatLuongClean(cleanRow []string, action string) QualityResult {
 	return QualityResult{false, "", "unknown"}
 }
 
-// --- Struct Profile & Hàm Make (Giữ nguyên gọn gàng) ---
 type AuthProfile struct { Status string `json:"status"`; Note string `json:"note"`; DeviceId string `json:"device_id"`; UserId string `json:"user_id"`; UserSec string `json:"user_sec"`; UserName string `json:"user_name"`; Email string `json:"email"`; NickName string `json:"nick_name"`; Password string `json:"password"`; PasswordEmail string `json:"password_email"`; RecoveryEmail string `json:"recovery_email"`; TwoFa string `json:"two_fa"`; Phone string `json:"phone"`; Birthday string `json:"birthday"`; ClientId string `json:"client_id"`; RefreshToken string `json:"refresh_token"`; AccessToken string `json:"access_token"`; Cookie string `json:"cookie"`; UserAgent string `json:"user_agent"`; Proxy string `json:"proxy"`; ProxyExpired string `json:"proxy_expired"`; CreateCountry string `json:"create_country"`; CreateTime string `json:"create_time"` }
 type ActivityProfile struct { StatusPost string `json:"status_post"`; DailyPostLimit string `json:"daily_post_limit"`; TodayPostCount string `json:"today_post_count"`; DailyFollowLimit string `json:"daily_follow_limit"`; TodayFollowCount string `json:"today_follow_count"`; LastActiveDate string `json:"last_active_date"`; FollowerCount string `json:"follower_count"`; FollowingCount string `json:"following_count"`; LikesCount string `json:"likes_count"`; VideoCount string `json:"video_count"`; StatusLive string `json:"status_live"`; LivePhoneAccess string `json:"live_phone_access"`; LiveStudioAccess string `json:"live_studio_access"`; LiveKey string `json:"live_key"`; LastLiveDuration string `json:"last_live_duration"`; ShopRole string `json:"shop_role"`; ShopId string `json:"shop_id"`; ProductCount string `json:"product_count"`; ShopHealth string `json:"shop_health"`; TotalOrders string `json:"total_orders"`; TotalRevenue string `json:"total_revenue"`; CommissionRate string `json:"commission_rate"` }
 type AiProfile struct { Signature string `json:"signature"`; DefaultCategory string `json:"default_category"`; DefaultProduct string `json:"default_product"`; PreferredKeywords string `json:"preferred_keywords"`; PreferredHashtags string `json:"preferred_hashtags"`; WritingStyle string `json:"writing_style"`; MainGoal string `json:"main_goal"`; DefaultCta string `json:"default_cta"`; ContentLength string `json:"content_length"`; ContentType string `json:"content_type"`; TargetAudience string `json:"target_audience"`; VisualStyle string `json:"visual_style"`; AiPersona string `json:"ai_persona"`; BannedKeywords string `json:"banned_keywords"`; ContentLanguage string `json:"content_language"`; Country string `json:"country"` }
