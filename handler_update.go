@@ -176,6 +176,10 @@ func applyUpdateToRow(cache *SheetCacheData, idx int, updateCols map[int]interfa
 	oldStatus := cleanRow[INDEX_DATA_TIKTOK.STATUS]
 	oldDev := cleanRow[INDEX_DATA_TIKTOK.DEVICE_ID]
 
+	// 🔥 LẤY NOTE CŨ RA TRƯỚC KHI VÒNG LẶP UPDATE CHẠY
+	// (Fix lỗi: Nếu chạy vòng lặp trước, note cũ sẽ bị đè mất, làm hàm tạo note sau đó reset về 1)
+	realOldNote := fmt.Sprintf("%v", row[INDEX_DATA_TIKTOK.NOTE])
+
 	// 1. Apply Data
 	for colIdx, val := range updateCols {
 		if colIdx >= 0 && colIdx < len(row) {
@@ -195,9 +199,11 @@ func applyUpdateToRow(cache *SheetCacheData, idx int, updateCols map[int]interfa
 		_, hasNote := updateCols[INDEX_DATA_TIKTOK.NOTE]
 		if hasSt || hasNote {
 			content := ""; if v, ok := updateCols[INDEX_DATA_TIKTOK.NOTE]; ok { content = fmt.Sprintf("%v", v) }
-			oldNote := fmt.Sprintf("%v", row[INDEX_DATA_TIKTOK.NOTE])
+			
+			// Dùng realOldNote (đã capture ở trên) để đảm bảo giữ nguyên số lần chạy
 			newStatus := fmt.Sprintf("%v", row[INDEX_DATA_TIKTOK.STATUS])
-			finalNote := tao_ghi_chu_chuan_update(oldNote, content, newStatus)
+			finalNote := tao_ghi_chu_chuan_update(realOldNote, content, newStatus)
+			
 			row[INDEX_DATA_TIKTOK.NOTE] = finalNote
 			cleanRow[INDEX_DATA_TIKTOK.NOTE] = CleanString(finalNote)
 		}
