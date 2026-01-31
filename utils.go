@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
-	"regexp" // 🔥 Thêm thư viện Regex
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -11,39 +11,22 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// =================================================================================================
-// 🟢 1. CÁC HÀM TIỆN ÍCH CƠ BẢN
-// =================================================================================================
-
+// ... (Giữ nguyên các hàm CleanString, SafeString, toFloat, getFloatVal, ToSlice, ConvertSerialDate từ trước) ...
 var REGEX_INVISIBLE = regexp.MustCompile(`[\x{00A0}\x{200B}\x{200C}\x{200D}\x{FEFF}]`)
 
-// CleanString: Chuẩn hóa dữ liệu + FIX LỖI DẤU + XÓA KÝ TỰ ẨN (FIX TRIỆT ĐỂ)
 func CleanString(v interface{}) string {
 	if v == nil { return "" }
-	// Nếu là số float64, ép kiểu giữ nguyên
 	if f, ok := v.(float64); ok { return strings.TrimSpace(strconv.FormatFloat(f, 'f', -1, 64)) }
-	
-	// 1. Chuyển về string, viết thường
 	s := strings.ToLower(fmt.Sprintf("%v", v))
-	
-	// 2. Chuẩn hóa Unicode NFC (Gộp dấu)
 	s = norm.NFC.String(s)
-	
-	// 3. 🔥 XÓA KÝ TỰ ẨN (Nguyên nhân lỗi): Thay Non-breaking space bằng dấu cách
 	s = strings.ReplaceAll(s, "\u00A0", " ")
-	
-	// 4. Xóa các ký tự zero-width nếu có
 	s = REGEX_INVISIBLE.ReplaceAllString(s, "")
-
-	// 5. Cắt khoảng trắng thừa đầu đuôi
 	return strings.TrimSpace(s)
 }
 
-// SafeString: Giống CleanString nhưng GIỮ NGUYÊN HOA THƯỜNG
 func SafeString(v interface{}) string {
 	if v == nil { return "" }
 	if f, ok := v.(float64); ok { return strings.TrimSpace(strconv.FormatFloat(f, 'f', -1, 64)) }
-	
 	s := fmt.Sprintf("%v", v)
 	s = norm.NFC.String(s)
 	s = strings.ReplaceAll(s, "\u00A0", " ")
@@ -51,7 +34,6 @@ func SafeString(v interface{}) string {
 	return strings.TrimSpace(s)
 }
 
-// ... (Các hàm toFloat, getFloatVal, ToSlice, ConvertSerialDate... giữ nguyên như cũ) ...
 func toFloat(v interface{}) (float64, bool) {
 	if f, ok := v.(float64); ok { return f, true }
 	if s, ok := v.(string); ok {
@@ -94,8 +76,9 @@ func ConvertSerialDate(v interface{}) int64 {
 	return 0
 }
 
-// ... (Copy phần FilterParams, parseCriteriaSet, checkCriteriaMatch, isRowMatched, KiemTraChatLuongClean, Struct Profiles... GIỮ NGUYÊN TỪ FILE CŨ CỦA BẠN) ...
-// (Phần dưới này logic không đổi, chỉ cần thay hàm CleanString ở trên là đủ để fix lỗi)
+// =================================================================================================
+// 🔥 2. BỘ MÁY LỌC (FILTER ENGINE) - ĐÃ FIX LỖI ZERO VALUE
+// =================================================================================================
 
 type CriteriaSet struct {
 	MatchCols    map[int][]string
@@ -112,23 +95,33 @@ type FilterParams struct {
 	HasFilter   bool
 }
 
-func parseCriteriaSet(input interface{}) CriteriaSet {
-	c := CriteriaSet{
-		MatchCols: make(map[int][]string), ContainsCols: make(map[int][]string),
-		MinCols: make(map[int]float64), MaxCols: make(map[int]float64), TimeCols: make(map[int]float64),
-		IsEmpty: true,
+// Hàm khởi tạo CriteriaSet rỗng chuẩn (IsEmpty = true)
+func NewCriteriaSet() CriteriaSet {
+	return CriteriaSet{
+		MatchCols:    make(map[int][]string),
+		ContainsCols: make(map[int][]string),
+		MinCols:      make(map[int]float64),
+		MaxCols:      make(map[int]float64),
+		TimeCols:     make(map[int]float64),
+		IsEmpty:      true, // 🔥 QUAN TRỌNG: Mặc định là Rỗng
 	}
+}
+
+func parseCriteriaSet(input interface{}) CriteriaSet {
+	c := NewCriteriaSet() // Sử dụng hàm khởi tạo chuẩn
 	data, ok := input.(map[string]interface{})
 	if !ok { return c }
 
 	for k, v := range data {
 		if strings.HasPrefix(k, "match_col_") {
 			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "match_col_")); err == nil {
-				c.MatchCols[idx] = ToSlice(v); c.IsEmpty = false
+				vals := ToSlice(v)
+				if len(vals) > 0 { c.MatchCols[idx] = vals; c.IsEmpty = false }
 			}
 		} else if strings.HasPrefix(k, "contains_col_") {
 			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "contains_col_")); err == nil {
-				c.ContainsCols[idx] = ToSlice(v); c.IsEmpty = false
+				vals := ToSlice(v)
+				if len(vals) > 0 { c.ContainsCols[idx] = vals; c.IsEmpty = false }
 			}
 		} else if strings.HasPrefix(k, "min_col_") {
 			if idx, err := strconv.Atoi(strings.TrimPrefix(k, "min_col_")); err == nil {
@@ -148,19 +141,28 @@ func parseCriteriaSet(input interface{}) CriteriaSet {
 }
 
 func parseFilterParams(body map[string]interface{}) FilterParams {
-	f := FilterParams{HasFilter: false}
+	// 🔥 KHỞI TẠO VỚI IsEmpty = true ĐỂ TRÁNH LỖI ZERO VALUE
+	f := FilterParams{
+		AndCriteria: NewCriteriaSet(),
+		OrCriteria:  NewCriteriaSet(),
+		HasFilter:   false,
+	}
+
 	if v, ok := body["search_and"]; ok {
 		f.AndCriteria = parseCriteriaSet(v)
 	}
 	if v, ok := body["search_or"]; ok {
 		f.OrCriteria = parseCriteriaSet(v)
 	}
+	
+	// Bây giờ IsEmpty mặc định là true, nên phép kiểm tra này sẽ ĐÚNG
 	if !f.AndCriteria.IsEmpty || !f.OrCriteria.IsEmpty {
 		f.HasFilter = true
 	}
 	return f
 }
 
+// ... (Giữ nguyên checkCriteriaMatch, isRowMatched, QualityCheck, Profiles...) ...
 func checkCriteriaMatch(cleanRow []string, rawRow []interface{}, c CriteriaSet, modeMatchAll bool) bool {
 	if c.IsEmpty { return true }
 	
@@ -175,7 +177,6 @@ func checkCriteriaMatch(cleanRow []string, rawRow []interface{}, c CriteriaSet, 
 		for _, t := range targets { if t == cellVal { match = true; break } }
 		if res, stop := processResult(match); stop { return res }
 	}
-
 	for idx, targets := range c.ContainsCols {
 		cellVal := ""; if idx < len(cleanRow) { cellVal = cleanRow[idx] }
 		match := false
@@ -184,7 +185,6 @@ func checkCriteriaMatch(cleanRow []string, rawRow []interface{}, c CriteriaSet, 
 		}
 		if res, stop := processResult(match); stop { return res }
 	}
-
 	for idx, minVal := range c.MinCols {
 		val, ok := getFloatVal(rawRow, idx); match := ok && val >= minVal
 		if res, stop := processResult(match); stop { return res }
@@ -214,19 +214,15 @@ func isRowMatched(cleanRow []string, rawRow []interface{}, f FilterParams) bool 
 }
 
 type QualityResult struct { Valid bool; SystemEmail string; Missing string }
-
 func KiemTraChatLuongClean(cleanRow []string, action string) QualityResult {
 	if len(cleanRow) <= INDEX_DATA_TIKTOK.EMAIL { return QualityResult{false, "", "data_length"} }
 	rawEmail := cleanRow[INDEX_DATA_TIKTOK.EMAIL]
 	sysEmail := ""
 	if strings.Contains(rawEmail, "@") { parts := strings.Split(rawEmail, "@"); if len(parts) > 1 { sysEmail = parts[1] } }
-	
 	if action == "view_only" { return QualityResult{true, sysEmail, ""} }
-
 	hasEmail := (rawEmail != "")
 	hasUser := (cleanRow[INDEX_DATA_TIKTOK.USER_NAME] != "")
 	hasPass := (cleanRow[INDEX_DATA_TIKTOK.PASSWORD] != "")
-
 	if strings.Contains(action, "register") {
 		if hasEmail { return QualityResult{true, sysEmail, ""} }
 		return QualityResult{false, "", "email"}
