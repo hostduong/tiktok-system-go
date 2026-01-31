@@ -24,7 +24,6 @@ type LoginResponse struct {
 	AiProfile       AiProfile       `json:"ai_profile"`
 }
 
-// PriorityStep: Định nghĩa một bước tìm kiếm trong quy trình ưu tiên
 type PriorityStep struct {
 	Status  string
 	IsMy    bool
@@ -33,21 +32,19 @@ type PriorityStep struct {
 }
 
 // =================================================================================================
-// 🟢 HANDLER CHÍNH: TIẾP NHẬN & ĐIỀU PHỐI REQUEST
+// 🟢 HANDLER CHÍNH
 // =================================================================================================
 
 func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
-	// 1. Giải mã JSON Body
 	var body map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, `{"status":"false","messenger":"JSON Error"}`, 400)
 		return
 	}
 
-	// 🔥 DEBUG LOG: In ra console để kiểm tra Client có gửi thừa param không
-	fmt.Printf("\n🔵 [LOGIN REQUEST] Body: %+v\n", body)
+	// DEBUG LOG
+	fmt.Printf("\n🔵 [REQUEST BODY]: %+v\n", body)
 
-	// 2. Xác thực Token
 	tokenData, ok := r.Context().Value("tokenData").(*TokenData)
 	if !ok {
 		return
@@ -57,14 +54,12 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 	deviceId := CleanString(body["deviceId"])
 	reqType := CleanString(body["type"])
 
-	// 3. Xử lý cờ Reset
 	isReset := false
 	if reqAction, _ := body["action"].(string); CleanString(reqAction) == "reset" {
 		isReset = true
 		body["is_reset"] = true
 	}
 
-	// 4. Phân loại Action
 	action := "login"
 	if reqType == "view" {
 		action = "view_only"
@@ -80,32 +75,28 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 5. Gọi hàm xử lý
 	res, err := xu_ly_lay_du_lieu(sid, deviceId, body, action)
 
-	// 6. Trả về kết quả
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
-		fmt.Printf("🔴 [LOGIN ERROR] %s\n", err.Error()) // Log lỗi ra console
+		fmt.Printf("🔴 [ERROR]: %s\n", err.Error())
 		json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": err.Error()})
 		return
 	}
-	fmt.Println("🟢 [LOGIN SUCCESS]")
+	fmt.Println("🟢 [SUCCESS]")
 	json.NewEncoder(w).Encode(res)
 }
 
 // =================================================================================================
-// 🟢 CORE LOGIC: TÌM KIẾM VÀ XỬ LÝ DỮ LIỆU
+// 🟢 CORE LOGIC
 // =================================================================================================
 
 func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action string) (*LoginResponse, error) {
-	// 1. Tải dữ liệu từ Cache RAM
 	cacheData, err := LayDuLieu(sid, SHEET_NAMES.DATA_TIKTOK, false)
 	if err != nil {
 		return nil, fmt.Errorf("Lỗi tải dữ liệu")
 	}
 
-	// 2. Parse Row Index
 	rowIndexInput := -1
 	if v, ok := body["row_index"]; ok {
 		if val, ok := toFloat(v); ok {
@@ -113,55 +104,51 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 		}
 	}
 
-	// 3. Parse Bộ lọc (Gọi hàm từ utils.go)
+	// 🔥 LOGIC MỚI: Parse filter từ key "search"
 	filters := parseFilterParams(body)
+
+	// DEBUG LOG FILTER
+	if filters.HasFilter {
+		fmt.Printf("🔍 FILTER ACTIVATED! (Found 'search' object)\n")
+	} else {
+		fmt.Printf("🚀 AUTO MODE (No 'search' object found)\n")
+	}
 
 	STATE.SheetMutex.RLock()
 	rawLen := len(cacheData.RawValues)
 
-	// ---------------------------------------------------------------------------------------------
-	// 📍 NHÁNH 1: ƯU TIÊN TUYỆT ĐỐI (ROW INDEX)
-	// ---------------------------------------------------------------------------------------------
+	// --- NHÁNH 1: ROW INDEX ---
 	if rowIndexInput >= RANGES.DATA_START_ROW {
 		idx := rowIndexInput - RANGES.DATA_START_ROW
 		if idx >= 0 && idx < rawLen {
-			cleanRow := cacheData.CleanValues[idx]
-			row := cacheData.RawValues[idx]
-
 			if filters.HasFilter {
-				if !isRowMatched(cleanRow, row, filters) {
+				if !isRowMatched(cacheData.CleanValues[idx], cacheData.RawValues[idx], filters) {
 					STATE.SheetMutex.RUnlock()
 					return nil, fmt.Errorf("row_index không đủ điều kiện")
 				}
 			}
-
-			val := KiemTraChatLuongClean(cleanRow, action)
+			val := KiemTraChatLuongClean(cacheData.CleanValues[idx], action)
 			if val.Valid {
 				STATE.SheetMutex.RUnlock()
-				return commit_and_response(sid, deviceId, cacheData, idx, determineType(cleanRow), val.SystemEmail, action, 0)
-			} else {
-				STATE.SheetMutex.RUnlock()
-				return nil, fmt.Errorf("row_index tài khoản lỗi: %s", val.Missing)
+				return commit_and_response(sid, deviceId, cacheData, idx, determineType(cacheData.CleanValues[idx]), val.SystemEmail, action, 0)
 			}
+			STATE.SheetMutex.RUnlock()
+			return nil, fmt.Errorf("row_index tài khoản lỗi: %s", val.Missing)
 		}
 		STATE.SheetMutex.RUnlock()
 		return nil, fmt.Errorf("Dòng yêu cầu không tồn tại")
 	}
 
-	// ---------------------------------------------------------------------------------------------
-	// 📍 NHÁNH 2: TÌM KIẾM NÂNG CAO (FILTER)
-	// ---------------------------------------------------------------------------------------------
+	// --- NHÁNH 2: TÌM KIẾM NÂNG CAO (FILTER) ---
+	// Chỉ chạy vào đây nếu trong body có "search": { ... }
 	if filters.HasFilter {
 		for i, cleanRow := range cacheData.CleanValues {
-			// Gọi hàm từ utils.go
 			if !isRowMatched(cleanRow, cacheData.RawValues[i], filters) {
 				continue
 			}
-
 			if !checkStatusIsValid(cleanRow[INDEX_DATA_TIKTOK.STATUS], action) {
 				continue
 			}
-
 			curDev := cleanRow[INDEX_DATA_TIKTOK.DEVICE_ID]
 			if curDev != "" && curDev != deviceId {
 				continue
@@ -171,16 +158,11 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 			if val.Valid {
 				STATE.SheetMutex.RUnlock()
 				STATE.SheetMutex.Lock()
-
 				currCleanRow := cacheData.CleanValues[i]
-				currDev := currCleanRow[INDEX_DATA_TIKTOK.DEVICE_ID]
-				currStatus := currCleanRow[INDEX_DATA_TIKTOK.STATUS]
-
-				if (currDev == "" || currDev == deviceId) && checkStatusIsValid(currStatus, action) {
+				if (currCleanRow[INDEX_DATA_TIKTOK.DEVICE_ID] == "" || currCleanRow[INDEX_DATA_TIKTOK.DEVICE_ID] == deviceId) && checkStatusIsValid(currCleanRow[INDEX_DATA_TIKTOK.STATUS], action) {
 					cacheData.CleanValues[i][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
 					cacheData.RawValues[i][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
 					cacheData.AssignedMap[deviceId] = i
-
 					STATE.SheetMutex.Unlock()
 					return commit_and_response(sid, deviceId, cacheData, i, determineType(currCleanRow), val.SystemEmail, action, 0)
 				}
@@ -196,9 +178,7 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 		return nil, fmt.Errorf("Không tìm thấy tài khoản theo điều kiện")
 	}
 
-	// ---------------------------------------------------------------------------------------------
-	// 📍 NHÁNH 3: TỰ ĐỘNG (AUTO / PRIORITY)
-	// ---------------------------------------------------------------------------------------------
+	// --- NHÁNH 3: TỰ ĐỘNG (AUTO) ---
 	if action != "view_only" {
 		isReset := false
 		if v, ok := body["is_reset"].(bool); ok && v {
@@ -212,15 +192,10 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 
 		for _, step := range steps {
 			indices := cacheData.StatusMap[step.Status]
-
 			for _, idx := range indices {
 				if idx < rawLen {
 					row := cacheData.CleanValues[idx]
-					curDev := row[INDEX_DATA_TIKTOK.DEVICE_ID]
-					isMyNick := (curDev == deviceId)
-					isEmptyNick := (curDev == "")
-
-					if (step.IsMy && isMyNick) || (step.IsEmpty && isEmptyNick) {
+					if (step.IsMy && row[INDEX_DATA_TIKTOK.DEVICE_ID] == deviceId) || (step.IsEmpty && row[INDEX_DATA_TIKTOK.DEVICE_ID] == "") {
 						val := KiemTraChatLuongClean(row, action)
 						if !val.Valid {
 							STATE.SheetMutex.RUnlock()
@@ -228,16 +203,12 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 							STATE.SheetMutex.RLock()
 							continue
 						}
-
 						STATE.SheetMutex.RUnlock()
 						STATE.SheetMutex.Lock()
-
-						currentRealDev := cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID]
-						if (step.IsMy && currentRealDev == deviceId) || (step.IsEmpty && currentRealDev == "") {
+						if (step.IsMy && cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] == deviceId) || (step.IsEmpty && cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] == "") {
 							cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
 							cacheData.RawValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] = deviceId
 							cacheData.AssignedMap[deviceId] = idx
-
 							STATE.SheetMutex.Unlock()
 							return commit_and_response(sid, deviceId, cacheData, idx, determineType(cacheData.CleanValues[idx]), val.SystemEmail, action, step.PrioID)
 						}
@@ -249,7 +220,7 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 		}
 	}
 
-	// Logic báo lỗi cuối cùng
+	// Check Completed
 	checkList := []string{"login", "auto", "login_reset", "register"}
 	isCheck := false
 	for _, s := range checkList {
@@ -258,7 +229,6 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 			break
 		}
 	}
-
 	if isCheck {
 		completedIndices := cacheData.StatusMap[STATUS_READ.COMPLETED]
 		hasCompletedNick := false
@@ -280,7 +250,7 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 }
 
 // =================================================================================================
-// 🛠 CÁC HÀM HỖ TRỢ NGHIỆP VỤ LOGIN (PRIVATE HELPERS)
+// 🛠 CÁC HÀM HỖ TRỢ NGHIỆP VỤ LOGIN
 // =================================================================================================
 
 func checkStatusIsValid(currentStatus, action string) bool {
@@ -308,7 +278,6 @@ func buildPrioritySteps(action string, isReset bool) []PriorityStep {
 	add := func(st string, my, empty bool, prio int) {
 		steps = append(steps, PriorityStep{Status: st, IsMy: my, IsEmpty: empty, PrioID: prio})
 	}
-
 	if strings.Contains(action, "login") {
 		add(STATUS_READ.RUNNING, true, false, 1)
 		add(STATUS_READ.WAITING, true, false, 2)
@@ -419,7 +388,6 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 			cache.CleanValues[cIdx][INDEX_DATA_TIKTOK.NOTE] = CleanString(cNote)
 		}
 		if oldCSt != CleanString(cSt) {
-			// Gọi hàm từ utils.go
 			removeFromStatusMap(cache.StatusMap, oldCSt, cIdx)
 			newCSt := CleanString(cSt)
 			cache.StatusMap[newCSt] = append(cache.StatusMap[newCSt], cIdx)
@@ -440,7 +408,6 @@ func commit_and_response(sid, deviceId string, cache *SheetCacheData, idx int, t
 		cache.CleanValues[idx][INDEX_DATA_TIKTOK.NOTE] = CleanString(tNote)
 	}
 	if oldCleanSt != CleanString(tSt) {
-		// Gọi hàm từ utils.go
 		removeFromStatusMap(cache.StatusMap, oldCleanSt, idx)
 		newSt := CleanString(tSt)
 		cache.StatusMap[newSt] = append(cache.StatusMap[newSt], idx)
@@ -479,7 +446,6 @@ func doSelfHealing(sid string, idx int, missing string, cache *SheetCacheData) {
 		cache.RawValues[idx][INDEX_DATA_TIKTOK.NOTE] = msg
 		if idx < len(cache.CleanValues) && INDEX_DATA_TIKTOK.STATUS < len(cache.CleanValues[idx]) {
 			oldSt := cache.CleanValues[idx][INDEX_DATA_TIKTOK.STATUS]
-			// Gọi hàm từ utils.go
 			removeFromStatusMap(cache.StatusMap, oldSt, idx)
 			cache.CleanValues[idx][INDEX_DATA_TIKTOK.STATUS] = CleanString(STATUS_WRITE.ATTENTION)
 		}
