@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 )
 
 /*
@@ -12,16 +13,16 @@ import (
 =================================================================================================
 
 1. MỤC ĐÍCH:
-   - Tìm kiếm dữ liệu trong Sheet dựa trên bộ lọc.
-   - Trả về kết quả dạng Map (Object) để dễ truy xuất.
+   - Tìm kiếm dữ liệu trong Sheet theo bộ lọc.
+   - Trả về dữ liệu an toàn (không bao giờ null).
+   - Kết quả trả về dạng Map Object để Client dễ truy xuất theo Index.
 
 2. CẤU TRÚC BODY REQUEST:
 {
   "token": "...",
   "sheet": "DataTiktok",      // (Optional) Tên sheet
   "limit": 50,                // (Optional) Giới hạn số dòng
-  "return_cols": [],          // (Optional) Nếu RỖNG hoặc KHÔNG GỬI -> Lấy hết các cột.
-                              // Nếu có gửi [0, 1, 6] -> Chỉ lấy cột 0, 1, 6.
+  "return_cols": [],          // (Optional) Nếu RỖNG -> Lấy hết. Nếu có [0, 6] -> Chỉ lấy cột 0 và 6.
 
   // --- BỘ LỌC CHUẨN ---
   "search_and": {
@@ -31,23 +32,28 @@ import (
   "search_or": { ... }
 }
 
-3. CẤU TRÚC RESPONSE (Dạng Map):
+3. CẤU TRÚC RESPONSE (Key col_X luôn được sắp xếp dễ đọc):
 {
     "status": "true",
-    "count": 2,
+    "messenger": "Thành công",
+    "count": 1,
     "data": {
-        "0": { "row_index": 15, "col_0": "...", "col_6": "..." },
-        "1": { "row_index": 28, "col_0": "...", "col_6": "..." }
+        "0": {
+            "row_index": 15,
+            "col_0": "Đang chạy",        // Luôn là string, không null
+            "col_1": "",                 // Nếu rỗng trả về ""
+            "col_6": "Tk_1|Pass_1"       // Giữ nguyên hoa thường
+        }
     }
 }
 */
 
-// Struct phản hồi kết quả tìm kiếm (Data là Map int -> Map string)
+// Struct phản hồi kết quả tìm kiếm
 type SearchResponse struct {
 	Status    string                            `json:"status"`
 	Messenger string                            `json:"messenger"`
 	Count     int                               `json:"count"`
-	Data      map[int]map[string]interface{}    `json:"data"` // 🔥 Dùng Map theo yêu cầu
+	Data      map[int]map[string]interface{}    `json:"data"` // Dạng Map { "0": {...}, "1": {...} }
 }
 
 func HandleSearchData(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +79,7 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 4. Phân tích tham số
-	filters := parseFilterParams(body) // Hàm từ utils.go
+	filters := parseFilterParams(body) // Dùng hàm chuẩn từ utils.go
 	
 	limit := 1000
 	if l, ok := body["limit"]; ok {
@@ -89,11 +95,12 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	// 🔥 Logic: Nếu returnCols rỗng -> fetchAll = true
+	// Sắp xếp returnCols để dữ liệu trả về theo thứ tự cột tăng dần (đẹp mắt)
+	sort.Ints(returnCols)
+	
 	fetchAll := (len(returnCols) == 0)
 
 	// 5. Thực hiện tìm kiếm (Scan)
-	// Khởi tạo Map kết quả thay vì Slice
 	results := make(map[int]map[string]interface{})
 	count := 0
 	
@@ -107,28 +114,32 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 		// Kiểm tra điều kiện lọc
 		if isRowMatched(cleanRow, rows[i], filters) {
 			
-			// Tạo object cho dòng này
 			item := make(map[string]interface{})
 			item["row_index"] = i + RANGES.DATA_START_ROW
 			
 			rawRow := rows[i]
 			
+			// 🔥 QUAN TRỌNG: Dùng SafeString để convert mọi thứ về String an toàn, giữ nguyên hoa thường
+			
 			if fetchAll {
-				// 🟢 TRƯỜNG HỢP 1: Lấy hết tất cả các cột có dữ liệu
+				// Case 1: Lấy hết tất cả cột
 				for colIdx, val := range rawRow {
-					// Chỉ lấy các cột có giá trị để JSON gọn (hoặc lấy hết tùy ý, ở đây lấy hết)
-					item[fmt.Sprintf("col_%d", colIdx)] = val
+					// SafeString: nil -> "", 123 -> "123", "AbC" -> "AbC"
+					item[fmt.Sprintf("col_%d", colIdx)] = SafeString(val)
 				}
 			} else {
-				// 🟢 TRƯỜNG HỢP 2: Chỉ lấy các cột trong return_cols
+				// Case 2: Chỉ lấy cột yêu cầu
 				for _, colIdx := range returnCols {
+					val := ""
 					if colIdx >= 0 && colIdx < len(rawRow) {
-						item[fmt.Sprintf("col_%d", colIdx)] = rawRow[colIdx]
+						val = SafeString(rawRow[colIdx])
 					}
+					// Dù cột đó không tồn tại trong data (Index Out of Range), vẫn trả về key đó với giá trị rỗng ""
+					// Giúp Tool phía Client không bị crash do thiếu key.
+					item[fmt.Sprintf("col_%d", colIdx)] = val
 				}
 			}
 			
-			// Gán vào Map kết quả với key là số thứ tự 0, 1, 2...
 			results[count] = item
 			count++
 		}
@@ -142,7 +153,7 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 		})
 	} else {
 		json.NewEncoder(w).Encode(SearchResponse{
-			Status: "true", Messenger: "Lấy dữ liệu thành công", Count: count, Data: results,
+			Status: "true", Messenger: "Thành công", Count: count, Data: results,
 		})
 	}
 }
