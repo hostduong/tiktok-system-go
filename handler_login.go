@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv" // 🔥 ĐÃ THÊM THƯ VIỆN NÀY ĐỂ FIX LỖI BUILD
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,7 +19,6 @@ type LoginResponse struct {
 	AuthProfile     AuthProfile     `json:"auth_profile"`
 	ActivityProfile ActivityProfile `json:"activity_profile"`
 	AiProfile       AiProfile       `json:"ai_profile"`
-	DebugLog        string          `json:"debug_log,omitempty"`
 }
 
 type PriorityStep struct {
@@ -52,10 +51,7 @@ func HandleAccountAction(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
-		json.NewEncoder(w).Encode(map[string]string{
-			"status":    "false",
-			"messenger": err.Error(),
-		})
+		json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": err.Error()})
 		return
 	}
 	json.NewEncoder(w).Encode(res)
@@ -68,10 +64,6 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	filters := parseFilterParams(body)
 	STATE.SheetMutex.RLock()
 	rawLen := len(cacheData.RawValues)
-
-	// Biến ghi log debug
-	var traceLog []string
-	addLog := func(msg string) { traceLog = append(traceLog, msg) }
 
 	// 1. ROW INDEX
 	if v, ok := body["row_index"]; ok {
@@ -93,37 +85,22 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 
 	// 2. PRIORITY STEPS
 	steps := buildPrioritySteps(action)
-	addLog(fmt.Sprintf("Start Auto for Device='%s'. Steps: %d", deviceId, len(steps)))
 
 	for _, step := range steps {
 		indices := cacheData.StatusMap[step.Status]
-		if len(indices) > 0 {
-			addLog(fmt.Sprintf("Step '%s' (Prio %d): Found %d rows", step.Status, step.PrioID, len(indices)))
-		}
-
 		for _, idx := range indices {
 			if idx < rawLen {
 				row := cacheData.CleanValues[idx]
-				
-				// Debug cho dòng 14 (Index 3)
-				if idx == 3 { 
-					addLog(fmt.Sprintf("--> CHECK ROW 14: Dev='%s' vs Req='%s'", row[INDEX_DATA_TIKTOK.DEVICE_ID], deviceId))
-				}
-
 				isMyDevice := (row[INDEX_DATA_TIKTOK.DEVICE_ID] == deviceId)
 				isEmptyDevice := (row[INDEX_DATA_TIKTOK.DEVICE_ID] == "")
 				
 				if (step.IsMy && isMyDevice) || (step.IsEmpty && isEmptyDevice) {
 					if filters.HasFilter {
-						if !isRowMatched(row, cacheData.RawValues[idx], filters) { 
-							if idx == 3 { addLog("--> Row 14 Failed: Filter Mismatch") }
-							continue 
-						}
+						if !isRowMatched(row, cacheData.RawValues[idx], filters) { continue }
 					}
 					
 					val := KiemTraChatLuongClean(row, action)
 					if !val.Valid {
-						if idx == 3 { addLog(fmt.Sprintf("--> Row 14 Failed: Quality (%s)", val.Missing)) }
 						STATE.SheetMutex.RUnlock(); doSelfHealing(sid, idx, val.Missing, cacheData); STATE.SheetMutex.RLock()
 						continue
 					}
@@ -138,8 +115,6 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 						return commit_and_response(sid, deviceId, cacheData, idx, determineType(cacheData.CleanValues[idx]), val.SystemEmail, action, step.PrioID, updateMap)
 					}
 					STATE.SheetMutex.Unlock(); STATE.SheetMutex.RLock()
-				} else {
-					if idx == 3 { addLog(fmt.Sprintf("--> Row 14 Failed: Device Mismatch (MyConfig=%v, EmptyConfig=%v)", step.IsMy, step.IsEmpty)) }
 				}
 			}
 		}
@@ -153,14 +128,13 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 		completedIndices := cacheData.StatusMap[STATUS_READ.COMPLETED]
 		for _, idx := range completedIndices {
 			if idx < rawLen && cacheData.CleanValues[idx][INDEX_DATA_TIKTOK.DEVICE_ID] == deviceId {
-				STATE.SheetMutex.RUnlock()
-				return nil, fmt.Errorf("Các tài khoản đã hoàn thành. [DEBUG: %s]", strings.Join(traceLog, " | "))
+				STATE.SheetMutex.RUnlock(); return nil, fmt.Errorf("Các tài khoản đã hoàn thành")
 			}
 		}
 	}
 
 	STATE.SheetMutex.RUnlock()
-	return nil, fmt.Errorf("Không còn tài khoản phù hợp. [DEBUG: %s]", strings.Join(traceLog, " | "))
+	return nil, fmt.Errorf("Không còn tài khoản phù hợp")
 }
 
 func buildPrioritySteps(action string) []PriorityStep {
@@ -274,7 +248,6 @@ func parseUpdateDataLogin(body map[string]interface{}) map[int]interface{} {
 			for k, val := range updatedMap {
 				if strings.HasPrefix(k, "col_") {
 					if idxStr := strings.TrimPrefix(k, "col_"); idxStr != "" {
-						// 🔥 CẦN strconv ĐỂ CHẠY HÀM Atoi NÀY
 						if idx, err := strconv.Atoi(idxStr); err == nil {
 							cols[idx] = val
 						}
