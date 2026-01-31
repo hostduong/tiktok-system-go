@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// --- 1. CÁC HÀM TIỆN ÍCH CƠ BẢN ---
+// --- 1. CÁC HÀM TIỆN ÍCH CƠ BẢN --
 
 func CleanString(v interface{}) string {
 	if v == nil { return "" }
