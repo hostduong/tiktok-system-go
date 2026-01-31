@@ -142,14 +142,48 @@ func xu_ly_lay_du_lieu(sid, deviceId string, body map[string]interface{}, action
 	// --- NHÁNH 2: TÌM KIẾM NÂNG CAO (FILTER) ---
 	// Chỉ chạy vào đây nếu trong body có "search": { ... }
 	if filters.HasFilter {
+		
+		// 🔥🔥 [DEBUG START] ĐOẠN LOG SOI DỮ LIỆU CỰC MẠNH 🔥🔥
+		fmt.Println("\n🔥🔥 [DEBUG SOI DỮ LIỆU] BẮT ĐẦU QUÉT FILTER 🔥🔥")
+		
 		for i, cleanRow := range cacheData.CleanValues {
+			// Chỉ soi đúng dòng của deviceId này để tránh spam log
+			curDev := cleanRow[INDEX_DATA_TIKTOK.DEVICE_ID]
+			if curDev == deviceId { // deviceId="1"
+				realIdx := i + RANGES.DATA_START_ROW
+				valInRAM := cleanRow[INDEX_DATA_TIKTOK.USER_NAME] // Cột 5
+				
+				fmt.Printf("\n🔴 === SOI DÒNG %d (Status: %s) ===\n", realIdx, cleanRow[INDEX_DATA_TIKTOK.STATUS])
+				
+				// 1. In ra giá trị Server đang giữ (Dùng %q để thấy ký tự ẩn)
+				fmt.Printf("   👉 Server thấy (RAM): %q  (Độ dài: %d)\n", valInRAM, len(valInRAM))
+				
+				// 2. In ra giá trị bạn gửi lên (nếu bạn đang lọc theo cột này)
+				if targets, ok := filters.AndCriteria.MatchCols[INDEX_DATA_TIKTOK.USER_NAME]; ok {
+					for _, t := range targets {
+						fmt.Printf("   👉 Bạn gửi (Request): %q  (Độ dài: %d)\n", t, len(t))
+						
+						// 3. Test so sánh trực tiếp
+						if t == valInRAM {
+							fmt.Println("   ✅ KẾT QUẢ: KHỚP 100% (Code chạy đúng)")
+						} else {
+							fmt.Println("   ❌ KẾT QUẢ: KHÔNG KHỚP (Lỗi do dữ liệu khác nhau)")
+						}
+					}
+				}
+				fmt.Println("================================================")
+			}
+			// 🔥🔥 [DEBUG END] 🔥🔥
+
+			// === LOGIC CŨ ===
 			if !isRowMatched(cleanRow, cacheData.RawValues[i], filters) {
 				continue
 			}
 			if !checkStatusIsValid(cleanRow[INDEX_DATA_TIKTOK.STATUS], action) {
 				continue
 			}
-			curDev := cleanRow[INDEX_DATA_TIKTOK.DEVICE_ID]
+			// Đoạn này check deviceId: Nếu cột deviceId đã có người khác -> Bỏ qua
+			// Nhưng nếu cột deviceId == deviceId của mình -> OK
 			if curDev != "" && curDev != deviceId {
 				continue
 			}
