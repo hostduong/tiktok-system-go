@@ -13,26 +13,21 @@ import (
 =================================================================================================
 
 1. MỤC ĐÍCH:
-   - Tìm kiếm dữ liệu trong Sheet theo bộ lọc.
-   - Trả về dữ liệu an toàn (không bao giờ null).
-   - Kết quả trả về dạng Map Object để Client dễ truy xuất theo Index.
+   - Tìm kiếm dữ liệu và trả về kết quả đầy đủ (Full Columns) hoặc tùy chọn.
+   - Luôn đảm bảo trả về chuỗi (String), không bao giờ null.
 
 2. CẤU TRÚC BODY REQUEST:
 {
   "token": "...",
-  "sheet": "DataTiktok",      // (Optional) Tên sheet
-  "limit": 50,                // (Optional) Giới hạn số dòng
-  "return_cols": [],          // (Optional) Nếu RỖNG -> Lấy hết. Nếu có [0, 6] -> Chỉ lấy cột 0 và 6.
+  "sheet": "DataTiktok",
+  "limit": 50,
+  "return_cols": [],          // Rỗng = Lấy đủ 61 cột (0->60).
 
-  // --- BỘ LỌC CHUẨN ---
-  "search_and": {
-      "match_col_0": ["đang chạy"],
-      "contains_col_6": ["@gmail.com"]
-  },
+  "search_and": { ... },
   "search_or": { ... }
 }
 
-3. CẤU TRÚC RESPONSE (Key col_X luôn được sắp xếp dễ đọc):
+3. CẤU TRÚC RESPONSE:
 {
     "status": "true",
     "messenger": "Thành công",
@@ -40,20 +35,19 @@ import (
     "data": {
         "0": {
             "row_index": 15,
-            "col_0": "Đang chạy",        // Luôn là string, không null
-            "col_1": "",                 // Nếu rỗng trả về ""
-            "col_6": "Tk_1|Pass_1"       // Giữ nguyên hoa thường
+            "col_0": "...",
+            ...
+            "col_60": "" (Luôn có đủ key đến 60)
         }
     }
 }
 */
 
-// Struct phản hồi kết quả tìm kiếm
 type SearchResponse struct {
 	Status    string                            `json:"status"`
 	Messenger string                            `json:"messenger"`
 	Count     int                               `json:"count"`
-	Data      map[int]map[string]interface{}    `json:"data"` // Dạng Map { "0": {...}, "1": {...} }
+	Data      map[int]map[string]interface{}    `json:"data"`
 }
 
 func HandleSearchData(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +57,7 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"status":"false","messenger":"JSON Error"}`, 400); return
 	}
 
-	// 2. Xác thực Token
+	// 2. Xác thực
 	tokenData, ok := r.Context().Value("tokenData").(*TokenData)
 	if !ok { return }
 
@@ -71,22 +65,21 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 	sheetName := CleanString(body["sheet"])
 	if sheetName == "" { sheetName = SHEET_NAMES.DATA_TIKTOK }
 
-	// 3. Tải dữ liệu Cache
+	// 3. Tải dữ liệu
 	cacheData, err := LayDuLieu(sid, sheetName, false)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]string{"status": "false", "messenger": "Lỗi tải dữ liệu"})
 		return
 	}
 
-	// 4. Phân tích tham số
-	filters := parseFilterParams(body) // Dùng hàm chuẩn từ utils.go
+	// 4. Phân tích bộ lọc
+	filters := parseFilterParams(body)
 	
 	limit := 1000
 	if l, ok := body["limit"]; ok {
 		if val, ok := toFloat(l); ok && val > 0 { limit = int(val) }
 	}
 
-	// Xác định cột cần lấy (Projection)
 	var returnCols []int
 	if v, ok := body["return_cols"]; ok {
 		if arr, ok := v.([]interface{}); ok {
@@ -95,23 +88,23 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	// Sắp xếp returnCols để dữ liệu trả về theo thứ tự cột tăng dần (đẹp mắt)
 	sort.Ints(returnCols)
-	
 	fetchAll := (len(returnCols) == 0)
 
-	// 5. Thực hiện tìm kiếm (Scan)
+	// 5. Thực hiện tìm kiếm
 	results := make(map[int]map[string]interface{})
 	count := 0
 	
-	STATE.SheetMutex.RLock() // Khóa đọc
+	STATE.SheetMutex.RLock()
 	rows := cacheData.RawValues
 	cleanRows := cacheData.CleanValues
 	
+	// Xác định số cột tối đa cần lấy (Mặc định 61 cột theo cấu hình)
+	maxColLimit := CACHE.CLEAN_COL_LIMIT // 61 (Từ 0 đến 60)
+
 	for i, cleanRow := range cleanRows {
 		if count >= limit { break }
 
-		// Kiểm tra điều kiện lọc
 		if isRowMatched(cleanRow, rows[i], filters) {
 			
 			item := make(map[string]interface{})
@@ -119,23 +112,25 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 			
 			rawRow := rows[i]
 			
-			// 🔥 QUAN TRỌNG: Dùng SafeString để convert mọi thứ về String an toàn, giữ nguyên hoa thường
-			
 			if fetchAll {
-				// Case 1: Lấy hết tất cả cột
-				for colIdx, val := range rawRow {
-					// SafeString: nil -> "", 123 -> "123", "AbC" -> "AbC"
-					item[fmt.Sprintf("col_%d", colIdx)] = SafeString(val)
+				// 🔥 LOGIC MỚI: Chạy vòng lặp cố định từ 0 đến 60
+				// Đảm bảo JSON luôn có đủ key col_0 -> col_60
+				for colIdx := 0; colIdx < maxColLimit; colIdx++ {
+					val := ""
+					// Kiểm tra xem rawRow có dữ liệu tại index đó không
+					if colIdx < len(rawRow) {
+						val = SafeString(rawRow[colIdx])
+					}
+					// Gán vào map (Nếu rawRow thiếu thì val vẫn là "")
+					item[fmt.Sprintf("col_%d", colIdx)] = val
 				}
 			} else {
-				// Case 2: Chỉ lấy cột yêu cầu
+				// Logic lấy theo cột chỉ định
 				for _, colIdx := range returnCols {
 					val := ""
 					if colIdx >= 0 && colIdx < len(rawRow) {
 						val = SafeString(rawRow[colIdx])
 					}
-					// Dù cột đó không tồn tại trong data (Index Out of Range), vẫn trả về key đó với giá trị rỗng ""
-					// Giúp Tool phía Client không bị crash do thiếu key.
 					item[fmt.Sprintf("col_%d", colIdx)] = val
 				}
 			}
@@ -144,7 +139,7 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 			count++
 		}
 	}
-	STATE.SheetMutex.RUnlock() // Mở khóa
+	STATE.SheetMutex.RUnlock()
 
 	// 6. Trả về kết quả
 	if count == 0 {
