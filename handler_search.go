@@ -13,8 +13,9 @@ import (
 =================================================================================================
 
 1. MỤC ĐÍCH:
-   - Tìm kiếm dữ liệu và trả về kết quả đầy đủ (Full Columns) hoặc tùy chọn.
-   - Luôn đảm bảo trả về chuỗi (String), không bao giờ null.
+   - Tìm kiếm dữ liệu và trả về kết quả đầy đủ 61 cột.
+   - Trả về key chuẩn col_0, col_1... (Không padding số 0).
+   - Giá trị trả về luôn là String, không bao giờ null.
 
 2. CẤU TRÚC BODY REQUEST:
 {
@@ -36,8 +37,9 @@ import (
         "0": {
             "row_index": 15,
             "col_0": "...",
+            "col_1": "...",
             ...
-            "col_60": "" (Luôn có đủ key đến 60)
+            "col_60": "" 
         }
     }
 }
@@ -99,8 +101,7 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 	rows := cacheData.RawValues
 	cleanRows := cacheData.CleanValues
 	
-	// Xác định số cột tối đa cần lấy (Mặc định 61 cột theo cấu hình)
-	maxColLimit := CACHE.CLEAN_COL_LIMIT // 61 (Từ 0 đến 60)
+	maxColLimit := CACHE.CLEAN_COL_LIMIT // 61 (Từ 0 -> 60)
 
 	for i, cleanRow := range cleanRows {
 		if count >= limit { break }
@@ -113,15 +114,13 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 			rawRow := rows[i]
 			
 			if fetchAll {
-				// 🔥 LOGIC MỚI: Chạy vòng lặp cố định từ 0 đến 60
-				// Đảm bảo JSON luôn có đủ key col_0 -> col_60
+				// 🔥 LOGIC: Lấy đủ 61 cột (0 -> 60)
 				for colIdx := 0; colIdx < maxColLimit; colIdx++ {
 					val := ""
-					// Kiểm tra xem rawRow có dữ liệu tại index đó không
 					if colIdx < len(rawRow) {
 						val = SafeString(rawRow[colIdx])
 					}
-					// Gán vào map (Nếu rawRow thiếu thì val vẫn là "")
+					// 🔥 KEY CHUẨN: col_%d (col_1, col_10...) - Giữ đúng logic hệ thống
 					item[fmt.Sprintf("col_%d", colIdx)] = val
 				}
 			} else {
