@@ -36,8 +36,9 @@ import (
 3. CẤU TRÚC RESPONSE (JSON Ordered):
 {
     "status": "true",
-    "messenger": "Thành công",
-    "count": 1,
+    "type": "search",            <-- ĐÃ THÊM ĐỂ ĐỒNG BỘ
+    "messenger": "Lấy dữ liệu thành công",
+    "count": 5,
     "data": {
         "0": {
             "row_index": 15,     <-- LUÔN ĐỨNG ĐẦU TIÊN
@@ -97,9 +98,10 @@ func (r *OrderedRow) MarshalJSON() ([]byte, error) {
 
 type SearchResponse struct {
 	Status    string                `json:"status"`
-	Messenger string                `json:"messenger"`
+	Type      string                `json:"type"`      // Loại phản hồi (search)
+	Messenger string                `json:"messenger"` // Thông báo đẹp
 	Count     int                   `json:"count"`
-	Data      map[int]*OrderedRow   `json:"data"` // Key là số thứ tự (0, 1, 2...)
+	Data      map[int]*OrderedRow   `json:"data"`      // Key là số thứ tự (0, 1, 2...)
 }
 
 // =================================================================================================
@@ -198,12 +200,20 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 	// 6. Trả về kết quả
 	if count == 0 {
 		json.NewEncoder(w).Encode(SearchResponse{
-			Status: "false", Messenger: "Không tìm thấy dữ liệu", Count: 0, Data: make(map[int]*OrderedRow),
+			Status:    "false", 
+			Type:      "search",
+			Messenger: "Không tìm thấy dữ liệu phù hợp", 
+			Count:     0, 
+			Data:      make(map[int]*OrderedRow),
 		})
 	} else {
 		// Custom Marshaler sẽ lo việc sắp xếp JSON
 		json.NewEncoder(w).Encode(SearchResponse{
-			Status: "true", Messenger: "Thành công", Count: count, Data: results,
+			Status:    "true", 
+			Type:      "search",
+			Messenger: fmt.Sprintf("Lấy dữ liệu thành công (%d dòng)", count), 
+			Count:     count, 
+			Data:      results,
 		})
 	}
 }
