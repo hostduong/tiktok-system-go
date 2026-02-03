@@ -13,48 +13,63 @@ import (
 📘 TÀI LIỆU API: GHI LOG & DỮ LIỆU (POST /tool/log)
 =================================================================================================
 
-1. TÍNH NĂNG MỚI (AUTO TIME):
-   - Nếu nội dung cột có chứa ký tự "{{time}}", Server sẽ tự động thay thế bằng thời gian hiện tại.
-   - Định dạng: dd/mm/yyyy HH:MM:SS (Múi giờ Việt Nam UTC+7).
-   - Ví dụ: Client gửi "Lỗi lúc {{time}}" -> Server ghi "Lỗi lúc 23/12/2025 11:10:39".
+1. MỤC ĐÍCH:
+   - Ghi lại nhật ký hoạt động, lỗi, hoặc dữ liệu mới (như OTP, Email) vào Google Sheets.
+   - Hỗ trợ cơ chế "Write-Behind" (Trả về ngay, ghi sau) để không làm chậm Tool.
+   - Hỗ trợ ghi nóng vào RAM (Cache) để các tool khác có thể Search thấy ngay lập tức (dùng cho OTP).
 
-2. CẤU TRÚC BODY REQUEST:
+2. TÍNH NĂNG TỰ ĐỘNG (AUTO MACROS):
+   - {{time}} : Tự động thay thế bằng thời gian hiện tại (dd/mm/yyyy HH:MM:SS - Múi giờ VN).
+
+3. CẤU TRÚC BODY REQUEST:
 {
   "token": "...",
   "data": [
     {
-      "sheet": "PostLogger",
-      "action": "cache",        // cache = Ghi nóng RAM (Search thấy ngay)
-      "col_0": "{{time}}",      // <--- Server tự điền giờ vào đây
-      "col_1": "user_abc",
-      "col_2": "Đã login {{time}}" // <--- Có thể chèn vào giữa câu
-    }
+      "sheet": "PostLogger",    // Tên sheet cần ghi (Mặc định: PostLogger)
+      "action": "cache",        // "sheet" (Ghi đĩa) hoặc "cache" (Ghi đĩa + RAM nóng)
+      
+      // Dữ liệu các cột (col_X)
+      "col_0": "{{time}}",      // Cột A: Tự điền giờ
+      "col_1": "user_abc",      // Cột B: Tên User
+      "col_2": "Login OK",      // Cột C: Nội dung
+      "col_6": "123456"         // Cột G: Mã OTP (Ví dụ)
+    },
+    { ... } // Hỗ trợ ghi nhiều dòng 1 lúc
   ]
+}
+
+4. CẤU TRÚC RESPONSE:
+{
+    "status": "true",
+    "messenger": "Đã ghi log thành công"
 }
 */
 
 const (
-	TIME_MARKER = "{{time}}"            // Ký tự đánh dấu
+	TIME_MARKER = "{{time}}"            // Ký tự đánh dấu để thay thế giờ
 	TIME_LAYOUT = "02/01/2006 15:04:05" // Định dạng giờ: dd/mm/yyyy HH:MM:SS
 )
+
+// =================================================================================================
+// 🟢 HANDLER CHÍNH
+// =================================================================================================
 
 func HandleLogData(w http.ResponseWriter, r *http.Request) {
 	// 1. Giải mã JSON
 	var body map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"status":"false","messenger":"Lỗi Body JSON"}`, 400)
+		http.Error(w, `{"status":"false","messenger":"Lỗi cấu trúc JSON"}`, 400)
 		return
 	}
 
+	// 2. Xác thực Token
 	tokenData, ok := r.Context().Value("tokenData").(*TokenData)
-	if !ok {
-		http.Error(w, `{"status":"false","messenger":"Lỗi xác thực"}`, 401)
-		return
-	}
+	if !ok { return } // Middleware đã xử lý lỗi 401
 
 	dataList, _ := body["data"].([]interface{})
 	if len(dataList) == 0 {
-		json.NewEncoder(w).Encode(map[string]string{"status": "true", "messenger": "Không có dữ liệu"})
+		json.NewEncoder(w).Encode(map[string]string{"status": "true", "messenger": "Không có dữ liệu log"})
 		return
 	}
 
@@ -65,38 +80,40 @@ func HandleLogData(w http.ResponseWriter, r *http.Request) {
 	vnZone := time.FixedZone("UTC+7", 7*3600)
 	nowStr := time.Now().In(vnZone).Format(TIME_LAYOUT)
 
-	// 2. Duyệt từng dòng log
+	// 3. Duyệt và Xử lý từng dòng log
 	for _, item := range dataList {
 		obj, ok := item.(map[string]interface{})
 		if !ok { continue }
 
-		// A. Validate Sheet
+		// A. Validate Sheet Name (Chống ghi bậy vào sheet lung tung)
 		sheetName := SHEET_NAMES.POST_LOGGER
 		if s, ok := obj["sheet"].(string); ok && s != "" {
 			if isValidSheetName(s) { sheetName = s }
 		}
 
-		// B. Validate Action
+		// B. Xác định hành động (Ghi thường hay Ghi nóng)
 		action := "sheet"
 		if a, ok := obj["action"].(string); ok && a != "" { action = strings.ToLower(a) }
 
-		// C. Xây dựng Row
+		// C. Tìm cột lớn nhất để khởi tạo mảng
 		maxCol := 0
 		for k := range obj {
 			if strings.HasPrefix(k, "col_") {
-				idx, _ := strconv.Atoi(k[4:])
-				if idx > maxCol { maxCol = idx }
+				if idx, err := strconv.Atoi(k[4:]); err == nil { // Chỉ nhận col_ số nguyên
+					if idx > maxCol { maxCol = idx }
+				}
 			}
 		}
+		// Giới hạn cột an toàn (Tránh user gửi col_9999 gây tràn bộ nhớ)
 		if maxCol > 100 { maxCol = 100 }
 
+		// D. Xây dựng dòng dữ liệu (Row)
 		row := make([]interface{}, maxCol+1)
-		for i := range row { row[i] = "" }
+		for i := range row { row[i] = "" } // Init rỗng
 
 		for k, v := range obj {
 			if strings.HasPrefix(k, "col_") {
-				idx, _ := strconv.Atoi(k[4:])
-				if idx <= maxCol {
+				if idx, err := strconv.Atoi(k[4:]); err == nil && idx <= maxCol {
 					// 🔥 LOGIC AUTO TIME REPLACEMENT 🔥
 					val := v
 					if strVal, ok := v.(string); ok {
@@ -110,15 +127,17 @@ func HandleLogData(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Gom nhóm theo Sheet để Batch Write
 		rowsBySheet[sheetName] = append(rowsBySheet[sheetName], row)
 
-		// D. Xử lý Cache Real-time
+		// E. Xử lý Cache Real-time (Nếu action="cache")
+		// Dùng cho OTP/Email để Search thấy ngay lập tức
 		if strings.Contains(action, "cache") {
 			updateRamCache(tokenData.SpreadsheetID, sheetName, row)
 		}
 	}
 
-	// 3. Đẩy xuống Queue
+	// 4. Đẩy xuống Queue ghi đĩa
 	for sheet, rows := range rowsBySheet {
 		if len(rows) > 0 {
 			QueueAppend(tokenData.SpreadsheetID, sheet, rows)
@@ -129,9 +148,10 @@ func HandleLogData(w http.ResponseWriter, r *http.Request) {
 }
 
 // =================================================================================================
-// 🟢 CÁC HÀM HỖ TRỢ
+// 🛠️ CÁC HÀM HỖ TRỢ (HELPER FUNCTIONS)
 // =================================================================================================
 
+// Cập nhật nóng vào RAM (Thread-Safe)
 func updateRamCache(sid, sheetName string, row []interface{}) {
 	cacheKey := sid + KEY_SEPARATOR + sheetName
 
@@ -139,8 +159,10 @@ func updateRamCache(sid, sheetName string, row []interface{}) {
 	defer STATE.SheetMutex.Unlock()
 
 	if cached, exists := STATE.SheetCache[cacheKey]; exists {
+		// 1. Append dữ liệu thô
 		cached.RawValues = append(cached.RawValues, row)
 
+		// 2. Append dữ liệu sạch (CleanValues) để phục vụ Search
 		cleanRow := make([]string, CACHE.CLEAN_COL_LIMIT)
 		for i, val := range row {
 			if i < CACHE.CLEAN_COL_LIMIT {
@@ -148,15 +170,19 @@ func updateRamCache(sid, sheetName string, row []interface{}) {
 			}
 		}
 		cached.CleanValues = append(cached.CleanValues, cleanRow)
+		
+		// 3. Cập nhật thời gian truy cập (Để tránh bị dọn dẹp nhầm)
+		cached.LastAccessed = time.Now().UnixMilli()
 	}
 }
 
+// Danh sách các Sheet cho phép ghi Log
 func isValidSheetName(name string) bool {
 	switch name {
 	case SHEET_NAMES.POST_LOGGER, 
 		 SHEET_NAMES.EMAIL_LOGGER, 
 		 SHEET_NAMES.ERROR_LOGGER, 
-		 SHEET_NAMES.DATA_TIKTOK, 
+		 SHEET_NAMES.DATA_TIKTOK, // Cho phép ghi thêm nick mới
 		 SHEET_NAMES.USER_NAME:
 		return true
 	default:
