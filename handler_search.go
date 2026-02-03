@@ -36,7 +36,7 @@ import (
 3. CẤU TRÚC RESPONSE (JSON Ordered):
 {
     "status": "true",
-    "type": "search",            <-- ĐÃ THÊM ĐỂ ĐỒNG BỘ
+    "type": "search",
     "messenger": "Lấy dữ liệu thành công",
     "count": 5,
     "data": {
@@ -99,7 +99,7 @@ func (r *OrderedRow) MarshalJSON() ([]byte, error) {
 type SearchResponse struct {
 	Status    string                `json:"status"`
 	Type      string                `json:"type"`      // Loại phản hồi (search)
-	Messenger string                `json:"messenger"` // Thông báo đẹp
+	Messenger string                `json:"messenger"` // Thông báo ngắn gọn
 	Count     int                   `json:"count"`
 	Data      map[int]*OrderedRow   `json:"data"`      // Key là số thứ tự (0, 1, 2...)
 }
@@ -211,7 +211,7 @@ func HandleSearchData(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(SearchResponse{
 			Status:    "true", 
 			Type:      "search",
-			Messenger: fmt.Sprintf("Lấy dữ liệu thành công (%d dòng)", count), 
+			Messenger: "Lấy dữ liệu thành công", // Đã sửa ngắn gọn
 			Count:     count, 
 			Data:      results,
 		})
