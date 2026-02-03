@@ -33,7 +33,6 @@ func HandleMailData(w http.ResponseWriter, r *http.Request) {
 			sheet = s 
 		}
 		
-		// Đánh dấu nếu có ghi vào EmailLogger để kích hoạt dọn dẹp
 		if sheet == SHEET_NAMES.EMAIL_LOGGER {
 			hasEmailLog = true
 		}
@@ -58,7 +57,7 @@ func HandleMailData(w http.ResponseWriter, r *http.Request) {
 		if len(r) > 0 { QueueAppend(tokenData.SpreadsheetID, s, r) }
 	}
 
-	// 🔥 KÍCH HOẠT DỌN DẸP (Chạy ngầm)
+	// Kích hoạt dọn dẹp nếu có log mail
 	if hasEmailLog {
 		go CleanupOldMails(tokenData.SpreadsheetID)
 	}
@@ -123,19 +122,26 @@ func HandleReadMail(w http.ResponseWriter, r *http.Request) {
 	}
 	STATE.SheetMutex.RUnlock()
 
+	// Đánh dấu đã đọc -> Cập nhật RAM nóng
 	if found && markRead {
 		STATE.SheetMutex.Lock()
+		// Kiểm tra lại index vì có thể RAM vừa bị cắt bởi luồng Cleanup
 		if targetIdx < len(cacheData.RawValues) {
 			cacheData.RawValues[targetIdx][7] = "TRUE"
 			if targetIdx < len(cacheData.CleanValues) && 7 < len(cacheData.CleanValues[targetIdx]) {
 				cacheData.CleanValues[targetIdx][7] = "true"
 			}
+			
+			// Copy dữ liệu để ghi xuống Disk
+			rowToUpdate := make([]interface{}, len(cacheData.RawValues[targetIdx]))
+			copy(rowToUpdate, cacheData.RawValues[targetIdx])
+			STATE.SheetMutex.Unlock()
+			
+			// Ghi xuống Disk (Queue)
+			QueueUpdate(sid, SHEET_NAMES.EMAIL_LOGGER, targetIdx, rowToUpdate)
+		} else {
+			STATE.SheetMutex.Unlock()
 		}
-		rowToUpdate := make([]interface{}, len(cacheData.RawValues[targetIdx]))
-		copy(rowToUpdate, cacheData.RawValues[targetIdx])
-		STATE.SheetMutex.Unlock()
-		
-		QueueUpdate(sid, SHEET_NAMES.EMAIL_LOGGER, targetIdx, rowToUpdate)
 	}
 
 	if found {
@@ -146,31 +152,46 @@ func HandleReadMail(w http.ResponseWriter, r *http.Request) {
 }
 
 // =================================================================================================
-// 🟢 LOGIC DỌN DẸP MAIL CŨ (AUTO CLEANUP)
+// 🟢 LOGIC DỌN DẸP THÔNG MINH (SMART CLEANUP - DISK & RAM TRIM)
 // =================================================================================================
 func CleanupOldMails(sid string) {
-	// 1. Kiểm tra Cache để biết số lượng dòng hiện tại
-	// (Không dùng Lock để tránh block các tiến trình khác, chỉ đọc nhanh)
-	STATE.SheetMutex.RLock()
+	STATE.SheetMutex.Lock() // 🔒 Khóa Ghi ngay từ đầu để tính toán chính xác
 	cacheKey := sid + KEY_SEPARATOR + SHEET_NAMES.EMAIL_LOGGER
 	cached, exists := STATE.SheetCache[cacheKey]
-	STATE.SheetMutex.RUnlock()
+	
+	if !exists { 
+		STATE.SheetMutex.Unlock()
+		return 
+	}
 
-	if !exists { return } // Nếu chưa có cache thì chưa cần dọn (hoặc để lần sau load sẽ biết)
+	// 1. Kiểm tra ngưỡng trong RAM
+	// Lưu ý: cached.RawValues là dữ liệu trong RAM (tương ứng dòng 112 trở đi)
+	ramCount := len(cached.RawValues)
+	
+	// Tổng dòng thực tế = Dòng bắt đầu (11) + Số dòng trong RAM
+	// Tuy nhiên RANGES.MAX_ROW_CLEAN (1112) là số dòng tuyệt đối trong Excel.
+	// RANGES.EMAIL_START_ROW (112).
+	// Vậy ngưỡng kích hoạt tính theo độ dài RAM là: 1112 - 112 = 1000 dòng.
+	thresholdRAM := RANGES.MAX_ROW_CLEAN - RANGES.EMAIL_START_ROW
 
-	// Tính tổng số dòng thực tế trên Sheet
-	// RANGES.DATA_START_ROW (11) + Số dòng trong Cache
-	currentTotalRows := RANGES.DATA_START_ROW + len(cached.RawValues)
+	if ramCount > thresholdRAM {
+		// Log
+		log.Printf("🧹 [CLEANUP] RAM Email vượt ngưỡng (%d dòng). Tiến hành cắt %d dòng...", ramCount, RANGES.DELETE_COUNT)
 
-	// 2. Kiểm tra ngưỡng cấu hình (1112 dòng)
-	if currentTotalRows > RANGES.MAX_ROW_CLEAN {
-		// Log báo hiệu
-		log.Printf("🧹 [CLEANUP] EmailLogger quá đầy (%d dòng). Đang xóa %d dòng cũ...", currentTotalRows, RANGES.DELETE_COUNT)
+		// 2. Cắt dữ liệu trong RAM (Slicing) - Giữ lại phần đuôi
+		if ramCount > RANGES.DELETE_COUNT {
+			cached.RawValues = cached.RawValues[RANGES.DELETE_COUNT:]
+			cached.CleanValues = cached.CleanValues[RANGES.DELETE_COUNT:]
+		} else {
+			// Trường hợp hiếm: Xóa sạch nếu số lượng xóa >= số lượng có
+			cached.RawValues = [][]interface{}{}
+			cached.CleanValues = [][]string{}
+		}
 
-		// 3. Gọi Google API để xóa hàng (DeleteDimension)
-		// API dùng Index bắt đầu từ 0.
-		// Sheet Row 112 => Index 111.
-		startIndex := int64(RANGES.EMAIL_START_ROW - 1) 
+		STATE.SheetMutex.Unlock() // 🔓 Mở khóa RAM để hệ thống chạy tiếp
+
+		// 3. Gọi Google API để xóa trên Disk (Chạy bất đồng bộ bên ngoài Lock)
+		startIndex := int64(RANGES.EMAIL_START_ROW - 1)
 		endIndex := startIndex + int64(RANGES.DELETE_COUNT)
 
 		req := &sheets.BatchUpdateSpreadsheetRequest{
@@ -178,7 +199,7 @@ func CleanupOldMails(sid string) {
 				{
 					DeleteDimension: &sheets.DeleteDimensionRequest{
 						Range: &sheets.DimensionRange{
-							SheetId:   getSheetIdByName(sid, SHEET_NAMES.EMAIL_LOGGER), // Cần hàm lấy ID số của Sheet
+							SheetId:   getSheetIdByName(sid, SHEET_NAMES.EMAIL_LOGGER),
 							Dimension: "ROWS",
 							StartIndex: startIndex,
 							EndIndex:   endIndex,
@@ -190,30 +211,23 @@ func CleanupOldMails(sid string) {
 
 		_, err := sheetsService.Spreadsheets.BatchUpdate(sid, req).Do()
 		if err != nil {
-			log.Printf("❌ [CLEANUP ERROR] Không thể xóa dòng: %v", err)
-			return
+			log.Printf("❌ [CLEANUP ERROR] Lỗi xóa Google Sheet: %v", err)
+			// Nếu xóa Disk lỗi nhưng RAM đã xóa -> Lần sau reload sẽ lại thấy cũ -> Chấp nhận được
+		} else {
+			log.Println("✅ [CLEANUP SUCCESS] Đã đồng bộ xóa trên Disk.")
 		}
-
-		// 4. QUAN TRỌNG: Hủy Cache ngay lập tức
-		// Để lần đọc tiếp theo Server buộc phải tải lại dữ liệu mới (đã bị cắt ngắn) từ Google
-		STATE.SheetMutex.Lock()
-		delete(STATE.SheetCache, cacheKey)
+	} else {
 		STATE.SheetMutex.Unlock()
-		
-		log.Println("✅ [CLEANUP SUCCESS] Đã dọn dẹp và reset cache EmailLogger.")
 	}
 }
 
-// Hàm hỗ trợ lấy SheetID (Dạng số) từ Tên Sheet (String)
-// Google API xóa dòng yêu cầu SheetId số (VD: 0, 12345), không phải tên "EmailLogger"
 func getSheetIdByName(spreadsheetId, sheetName string) int64 {
 	resp, err := sheetsService.Spreadsheets.Get(spreadsheetId).Do()
 	if err != nil { return 0 }
-	
 	for _, sheet := range resp.Sheets {
 		if sheet.Properties.Title == sheetName {
 			return sheet.Properties.SheetId
 		}
 	}
-	return 0 // Mặc định về sheet đầu tiên nếu không tìm thấy
+	return 0
 }
