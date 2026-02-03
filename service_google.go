@@ -32,7 +32,6 @@ func LayDuLieu(spreadsheetId, sheetName string, forceLoad bool) (*SheetCacheData
 	// Nếu có Cache và chưa hết hạn -> Trả về ngay
 	if exists && !forceLoad {
 		if time.Now().UnixMilli()-cached.Timestamp < cached.TTL {
-			// Update access time (dùng atomic hoặc lock nhẹ nếu cần, ở đây bỏ qua cho đơn giản)
 			return cached, nil
 		}
 	}
@@ -108,7 +107,7 @@ func LayDuLieu(spreadsheetId, sheetName string, forceLoad bool) (*SheetCacheData
 	return newData, nil
 }
 
-// --- QUEUE SYSTEM (Hệ thống ghi đĩa) ---
+// --- QUEUE SYSTEM (Hệ thống ghi đĩa - FIX BUG DEADLOCK) ---
 
 func QueueUpdate(sid, sheetName string, rowIndex int, rowData []interface{}) {
 	STATE.QueueMutex.Lock()
@@ -162,22 +161,27 @@ func QueueAppend(sid, sheetName string, rowsData [][]interface{}) {
 func FlushQueue(sid string, isShutdown bool) {
 	STATE.QueueMutex.Lock()
 	q, ok := STATE.WriteQueue[sid]
+	// Nếu Queue không tồn tại hoặc ĐANG CÓ NGƯỜI GHI -> Thoát ngay
 	if !ok || q.IsFlushing {
 		STATE.QueueMutex.Unlock()
 		return
 	}
+	
+	// Đánh dấu đang ghi
 	q.IsFlushing = true
-	q.Timer = false // Reset timer flag
-
+	q.Timer = false // Reset Timer để các request mới có thể hẹn giờ tiếp
+	
 	// Snapshot dữ liệu để nhả Lock sớm
 	updates := q.Updates
 	appends := q.Appends
-	// Reset Queue
+	// Reset Queue (Tạo map mới để hứng dữ liệu mới trong lúc đang ghi cũ)
 	q.Updates = make(map[string]map[int][]interface{})
 	q.Appends = make(map[string][][]interface{})
 	STATE.QueueMutex.Unlock()
 
-	// Thực thi ghi (Không giữ Lock)
+	// --- BẮT ĐẦU GHI (KHÔNG GIỮ LOCK) ---
+
+	// 1. Ghi Update (BatchUpdate)
 	for sheet, rowMap := range updates {
 		var batchData []*sheets.ValueRange
 		for idx, row := range rowMap {
@@ -198,6 +202,7 @@ func FlushQueue(sid string, isShutdown bool) {
 		}
 	}
 
+	// 2. Ghi Append
 	for sheet, rows := range appends {
 		if len(rows) > 0 {
 			_, err := sheetsService.Spreadsheets.Values.Append(sid, fmt.Sprintf("'%s'!A1", sheet), &sheets.ValueRange{
@@ -209,11 +214,16 @@ func FlushQueue(sid string, isShutdown bool) {
 		}
 	}
 
+	// --- KẾT THÚC GHI & KIỂM TRA LẠI ---
 	STATE.QueueMutex.Lock()
 	q.IsFlushing = false
-	// Nếu trong lúc ghi có dữ liệu mới -> Kích hoạt timer tiếp
-	if (len(q.Updates) > 0 || len(q.Appends) > 0) && !q.Timer && !isShutdown {
-		q.Timer = true
+	
+	// 🔥 FIX BUG DEADLOCK: 
+	// Luôn kiểm tra lại xem có dữ liệu mới ập đến trong lúc đang ghi không.
+	// BỎ QUA kiểm tra !q.Timer, cứ có dữ liệu là phải đảm bảo có Timer chạy.
+	if (len(q.Updates) > 0 || len(q.Appends) > 0) && !isShutdown {
+		// Luôn reset timer và chạy lại để đảm bảo không bỏ sót
+		q.Timer = true 
 		go func(id string) {
 			time.Sleep(time.Duration(QUEUE.FLUSH_INTERVAL_MS) * time.Millisecond)
 			FlushQueue(id, false)
